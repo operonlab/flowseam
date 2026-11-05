@@ -1,0 +1,24 @@
+[package]
+name = "flowseam-win"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "flowseam-win"
+path = "src/main.rs"
+
+[dependencies]
+flowseam-core = { path = "../flowseam-core" }
+flowseam-net = { path = "../flowseam-net" }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_Graphics_Gdi",
+    "Win32_Storage_FileSystem",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }

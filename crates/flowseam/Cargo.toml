@@ -1,0 +1,14 @@
+[package]
+name = "flowseam"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "flowseam"
+path = "src/main.rs"
+
+[dependencies]
+flowseam-core = { path = "../flowseam-core" }
+flowseam-net = { path = "../flowseam-net" }
+flowseam-mac = { path = "../flowseam-mac" }
+eframe = "0.37.0"

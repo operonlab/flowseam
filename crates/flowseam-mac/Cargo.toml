@@ -1,0 +1,10 @@
+[package]
+name = "flowseam-mac"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+flowseam-core = { path = "../flowseam-core" }
+flowseam-net = { path = "../flowseam-net" }
+# Already in the tree through getrandom; used for statvfs, whose struct differs per macOS arch.
+libc = "0.2"

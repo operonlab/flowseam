@@ -1,0 +1,3 @@
+[workspace]
+resolver = "2"
+members = ["crates/flowseam-core", "crates/flowseam-mac", "crates/flowseam-net", "crates/flowseam", "crates/flowseam-win"]
