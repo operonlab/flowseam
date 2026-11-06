@@ -13,6 +13,14 @@ pub type CGEventSourceRef = *const c_void;
 pub type CFMachPortRef = *mut c_void;
 pub type CFRunLoopSourceRef = *mut c_void;
 pub type CFTypeRef = *const c_void;
+#[repr(C)]
+pub struct CFRunLoopTimerContext {
+    pub version: isize,
+    pub info: *mut c_void,
+    pub retain: Option<extern "C" fn(*const c_void) -> *const c_void>,
+    pub release: Option<extern "C" fn(*const c_void)>,
+    pub copy_description: Option<extern "C" fn(*const c_void) -> *const c_void>,
+}
 pub type CGEventTapCallBack = extern "C" fn(*mut c_void, u32, CGEventRef, *mut c_void) -> CGEventRef;
 pub type CGDisplayReconfigurationCallBack = extern "C" fn(CGDirectDisplayID, u32, *mut c_void);
 
@@ -87,6 +95,8 @@ extern "C" {
     pub fn CGMainDisplayID() -> CGDirectDisplayID;
     pub fn CGGetActiveDisplayList(max: u32, displays: *mut CGDirectDisplayID, count: *mut u32) -> CGError;
     pub fn CGDisplayBounds(display: CGDirectDisplayID) -> CGRect;
+    pub fn CGWindowListCopyWindowInfo(option: u32, relative_to_window: u32) -> CFTypeRef;
+    pub static kCGWindowOwnerPID: CFTypeRef;
     pub fn CGDisplayHideCursor(display: CGDirectDisplayID) -> CGError;
     pub fn CGDisplayShowCursor(display: CGDirectDisplayID) -> CGError;
     pub fn CGAssociateMouseAndMouseCursorPosition(connected: bool) -> CGError;
@@ -126,10 +136,20 @@ extern "C" {
 #[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
     pub fn CFRelease(cf: CFTypeRef);
+    pub fn CFArrayGetCount(array: CFTypeRef) -> isize;
+    pub fn CFArrayGetValueAtIndex(array: CFTypeRef, index: isize) -> CFTypeRef;
+    pub fn CFDictionaryGetValue(dict: CFTypeRef, key: CFTypeRef) -> CFTypeRef;
+    pub fn CFNumberGetValue(number: CFTypeRef, the_type: i32, value: *mut c_void) -> bool;
     pub fn CFMachPortCreateRunLoopSource(alloc: *const c_void, port: CFMachPortRef, order: isize) -> CFRunLoopSourceRef;
     pub fn CFMachPortInvalidate(port: CFMachPortRef);
     pub fn CFRunLoopGetCurrent() -> *mut c_void;
     pub fn CFRunLoopAddSource(rl: *mut c_void, source: CFRunLoopSourceRef, mode: CFTypeRef);
+    pub fn CFRunLoopTimerCreate(allocator: *const c_void, fire_date: f64, interval: f64, flags: usize, order: isize, callout: extern "C" fn(*mut c_void, *mut c_void), context: *mut CFRunLoopTimerContext) -> *mut c_void;
+    pub fn CFRunLoopAddTimer(rl: *mut c_void, timer: *mut c_void, mode: CFTypeRef);
+    pub fn CFRunLoopTimerInvalidate(timer: *mut c_void);
+    pub fn CFAbsoluteTimeGetCurrent() -> f64;
+    #[cfg(test)]
+    pub fn CFRunLoopAddCommonMode(rl: *mut c_void, mode: CFTypeRef);
     pub fn CFRunLoopRunInMode(mode: CFTypeRef, seconds: f64, return_after_source: bool) -> i32;
     pub static kCFRunLoopDefaultMode: CFTypeRef;
     pub static kCFRunLoopCommonModes: CFTypeRef;
@@ -156,6 +176,18 @@ extern "C" {
 }
 /// `kKeyboardISO`: 'ISO '.
 pub const kKeyboardISO: u32 = 0x4953_4F20;
+
+/// `AEEventHandlerProcPtr`: (event, reply, refcon) -> OSErr.
+pub type AeHandler = extern "C" fn(*const c_void, *mut c_void, *mut c_void) -> i16;
+#[link(name = "CoreServices", kind = "framework")]
+extern "C" {
+    /// Replaces the process's handler for one Apple event, including one AppKit installed.
+    pub fn AEInstallEventHandler(class: u32, id: u32, handler: AeHandler, refcon: *mut c_void, is_sys_handler: u8) -> i16;
+}
+/// `kCoreEventClass`: 'aevt'.
+pub const kCoreEventClass: u32 = 0x6165_7674;
+/// `kAEQuitApplication`: 'quit'.
+pub const kAEQuitApplication: u32 = 0x7175_6974;
 
 extern "C" {
     /// libc `kill(pid, 0)`: existence probe, sends no signal.

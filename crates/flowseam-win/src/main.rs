@@ -60,8 +60,19 @@ fn real_main(args: &[String]) -> Result<(), String> {
                 });
             }
             let stdio = flag(args, "--stdio");
-            let clipboard = clipboard_factory(stdio);
-            let (injector, displays) = input_factory(stdio)?;
+            #[cfg(windows)]
+            let (clipboard, injector, displays) = if stdio {
+                let (injector, displays) = input_factory(true)?;
+                (clipboard_factory(true), injector, displays)
+            } else {
+                flowseam_win::real_host_parts()
+            };
+            #[cfg(not(windows))]
+            let (clipboard, injector, displays) = {
+                let clipboard = clipboard_factory(stdio);
+                let (injector, displays) = input_factory(stdio)?;
+                (clipboard, injector, displays)
+            };
             let host = Host {
                 clipboard: &*clipboard,
                 injector: &*injector,
@@ -85,15 +96,11 @@ type DisplayFactory = Box<dyn Fn() -> Result<Vec<Rect>, String> + Sync>;
 fn input_factory(force_stdio: bool) -> Result<(InjectorFactory, DisplayFactory), String> {
     #[cfg(windows)]
     {
-        // Physical pixels everywhere: before any cursor or monitor query. Not fatal: at 100 % scaling
-        // nothing is off, and refusing to start would take the clipboard down with it.
-        if let Err(e) = flowseam_win::win_input::dpi_aware() {
-            app::log(&format!("warning: {e}"));
+        if !force_stdio {
+            let (_, injector, displays) = flowseam_win::real_host_parts();
+            return Ok((injector, displays));
         }
         let displays: DisplayFactory = Box::new(flowseam_win::win_input::displays);
-        if !force_stdio {
-            return Ok((Box::new(|| Box::new(flowseam_win::win_input::SendInputInjector) as Box<dyn Injector>), displays));
-        }
         let start = displays()?.first().map_or(Point { x: 0, y: 0 }, |r| Point { x: r.x + r.w / 2, y: r.y + r.h / 2 });
         Ok((Box::new(move || Box::new(PrintInjector::new(start)) as Box<dyn Injector>), displays))
     }
@@ -111,10 +118,6 @@ fn input_factory(force_stdio: bool) -> Result<(InjectorFactory, DisplayFactory),
 type Factory = Box<dyn Fn() -> Result<Box<dyn Clipboard>, String> + Sync>;
 
 fn clipboard_factory(force_stdio: bool) -> Factory {
-    #[cfg(windows)]
-    if !force_stdio {
-        return Box::new(|| Ok(Box::new(flowseam_win::win32::WinClipboard::new()?) as Box<dyn Clipboard>));
-    }
     let shared = flowseam_win::stdio::StdioClipboard::spawn_stdin_reader();
     let _ = force_stdio;
     Box::new(move || Ok(Box::new(shared.clone()) as Box<dyn Clipboard>))

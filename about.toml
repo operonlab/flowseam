@@ -1,0 +1,23 @@
+# Licenses that may ship inside Flowseam's binaries, for `cargo about generate about.hbs`.
+# A dependency under any other license fails the notices build, so a new license is a decision, not a surprise.
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "ISC",
+    "0BSD",
+    "Zlib",
+    "Unlicense",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+]
+# Only what ships: the three release targets, without build- or dev-only crates.
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc"]
+ignore-build-dependencies = true
+ignore-dev-dependencies = true

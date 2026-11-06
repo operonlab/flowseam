@@ -29,11 +29,19 @@ trap 'rm -rf "$WORK"' EXIT
 mkdir "$WORK/src"
 git -C "$ROOT" archive "$REF" | tar -x -C "$WORK/src" || fail "cannot export $REF"
 
-if hits=$(grep -rIEn "$RELEASE_CHECK_DENY" "$WORK/src" --exclude=Cargo.lock); then
-  echo "$hits" | head -20 >&2
+# The scan reads a copy with every Unicode hyphen and dash folded to "-": a name typed with a non-breaking
+# hyphen (U+2011) does not match an ASCII pattern, and three such names once passed this scan unseen.
+fold_dashes() { perl -CSD -pe 's/\p{Dash}/-/g'; }
+[ "$(printf 'a\342\200\221b c\342\270\272d' | fold_dashes)" = "a-b c-d" ] || fail "dash folding does not work here"
+cp -R "$WORK/src" "$WORK/scan"
+grep -rIl --exclude=Cargo.lock . "$WORK/scan" | while IFS= read -r f; do
+  fold_dashes < "$f" > "$f.folded" && mv "$f.folded" "$f"
+done
+if hits=$(grep -rIEn "$RELEASE_CHECK_DENY" "$WORK/scan" --exclude=Cargo.lock); then
+  echo "$hits" | sed "s|$WORK/scan/||" | head -20 >&2
   fail "private names in $REF"
 fi
-grep -qIE "$RELEASE_CHECK_DENY" "$NOTES" && fail "private names in $NOTES"
+fold_dashes < "$NOTES" | grep -qIE "$RELEASE_CHECK_DENY" && fail "private names in $NOTES"
 
 echo "release: testing $REF"
 (cd "$WORK/src" && cargo test --workspace --locked) > "$WORK/test.log" 2>&1 || { tail -40 "$WORK/test.log" >&2; fail "tests failed"; }
@@ -69,14 +77,14 @@ cask "flowseam" do
   desc "Share one keyboard, mouse, clipboard and files between Macs and Windows PCs"
   homepage "https://github.com/$REPO"
 
-  depends_on macos: ">= :ventura"
+  depends_on macos: :ventura
 
   app "Flowseam.app"
 
   # Signed with Flowseam's own certificate but not notarized: without this, Gatekeeper refuses to open the
   # downloaded app. The signature stays, and it is what keeps the privacy grants across updates.
-  postflight do
-    system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{appdir}/Flowseam.app"]
+  postflight_steps do
+    run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{appdir}}/Flowseam.app"]
   end
 
   uninstall quit: "com.operonlab.flowseam"
@@ -93,4 +101,4 @@ git -C "$WORK/tap" commit -q -m "$(msg "flowseam $VER")" || fail "cask unchanged
 git -C "$WORK/tap" push -q origin HEAD || fail "push to $TAP failed"
 
 echo "release: v$VER is out"
-echo "  brew update && brew upgrade --cask flowseam   (first time: brew install --cask $TAP/flowseam)"
+echo "  brew update && brew upgrade --cask flowseam   (first time: brew install --cask operonlab/tap/flowseam)"

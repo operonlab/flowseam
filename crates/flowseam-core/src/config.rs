@@ -115,6 +115,44 @@ impl Default for Config {
     }
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ConfigDiff {
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
+    /// Same name, different addr or fingerprint: the link must be re-established.
+    pub relinked: Vec<String>,
+    /// Same name, same addr and fingerprint, different edge or key map: only the forwarder changes.
+    pub respecced: Vec<String>,
+    pub switch_changed: bool,
+    pub listen_changed: bool,
+}
+
+impl ConfigDiff {
+    pub fn is_empty(&self) -> bool {
+        self.added.is_empty() && self.removed.is_empty() && self.relinked.is_empty() && self.respecced.is_empty() && !self.switch_changed && !self.listen_changed
+    }
+}
+
+pub fn diff(old: &Config, new: &Config) -> ConfigDiff {
+    let old_peers: std::collections::BTreeMap<_, _> = old.peers.iter().map(|p| (p.name.as_str(), p)).collect();
+    let new_peers: std::collections::BTreeMap<_, _> = new.peers.iter().map(|p| (p.name.as_str(), p)).collect();
+    let mut result = ConfigDiff { switch_changed: old.switch != new.switch, listen_changed: old.listen != new.listen, ..ConfigDiff::default() };
+    for (name, peer) in &new_peers {
+        match old_peers.get(name) {
+            None => result.added.push((*name).into()),
+            Some(previous) if previous.addr != peer.addr || previous.fingerprint != peer.fingerprint => result.relinked.push((*name).into()),
+            Some(previous) if previous.edge != peer.edge || previous.keys != peer.keys => result.respecced.push((*name).into()),
+            _ => {}
+        }
+    }
+    for name in old_peers.keys() {
+        if !new_peers.contains_key(name) {
+            result.removed.push((*name).into());
+        }
+    }
+    result
+}
+
 #[derive(Debug)]
 pub enum ConfigError {
     Io(std::io::Error),
@@ -241,6 +279,41 @@ mod tests {
 
     fn peer(name: &str, edge: Edge) -> Peer {
         Peer { name: name.into(), addr: "192.168.1.20:24800".into(), edge, fingerprint: "ab".repeat(32), keys: KeyMap::default() }
+    }
+
+    #[test]
+    fn identical_configs_have_no_diff() {
+        let cfg = Config { peers: vec![peer("b", Edge::Right)], ..Config::default() };
+        assert_eq!(diff(&cfg, &cfg), ConfigDiff::default());
+        assert!(diff(&cfg, &cfg).is_empty());
+    }
+
+    #[test]
+    fn diff_classifies_and_sorts_each_kind_of_change() {
+        let old = Config { peers: vec![peer("z-remove", Edge::Left), peer("a-remove", Edge::Left), peer("z-link", Edge::Left), peer("a-link", Edge::Left), peer("z-spec", Edge::Left), peer("a-spec", Edge::Left)], ..Config::default() };
+        let mut new = old.clone();
+        new.peers.retain(|p| !p.name.ends_with("remove"));
+        new.peers.push(peer("z-add", Edge::Left));
+        new.peers.push(peer("a-add", Edge::Left));
+        new.peers.iter_mut().find(|p| p.name == "z-link").unwrap().addr = "192.168.1.21:24800".into();
+        let both = new.peers.iter_mut().find(|p| p.name == "a-link").unwrap();
+        both.fingerprint = "cd".repeat(32);
+        both.keys = KeyMap::Mac;
+        new.peers.iter_mut().find(|p| p.name == "z-spec").unwrap().edge = Edge::Right;
+        new.peers.iter_mut().find(|p| p.name == "a-spec").unwrap().keys = KeyMap::None;
+        new.switch.dwell_ms += 1;
+        new.listen = "0.0.0.0:24801".into();
+        let got = diff(&old, &new);
+        assert_eq!(got, ConfigDiff { added: vec!["a-add".into(), "z-add".into()], removed: vec!["a-remove".into(), "z-remove".into()], relinked: vec!["a-link".into(), "z-link".into()], respecced: vec!["a-spec".into(), "z-spec".into()], switch_changed: true, listen_changed: true });
+        assert!(!got.is_empty());
+    }
+
+    #[test]
+    fn renamed_peer_is_removed_and_added_even_with_the_same_link() {
+        let old = Config { peers: vec![peer("old", Edge::Right)], ..Config::default() };
+        let mut new = old.clone();
+        new.peers[0].name = "new".into();
+        assert_eq!(diff(&old, &new), ConfigDiff { added: vec!["new".into()], removed: vec!["old".into()], ..ConfigDiff::default() });
     }
 
     /// A config written before the setting existed still loads, with the default mapping.

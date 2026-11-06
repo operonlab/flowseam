@@ -126,6 +126,11 @@ pub struct Forwarder<S: InputSink, O: Outbox> {
     mac_keys: MacShortcuts,
     /// The primary button is down from a press made here while input stayed local.
     held_here: bool,
+    /// The primary button is physically down (tap view, any mode).
+    primary_down: bool,
+    /// Control left with a press made here still down: this machine saw that press, and its release goes
+    /// to the peer, so this machine owes itself a release when control comes back.
+    crossed_holding: bool,
 }
 
 impl<S: InputSink, O: Outbox> Forwarder<S, O> {
@@ -147,6 +152,8 @@ impl<S: InputSink, O: Outbox> Forwarder<S, O> {
             last_pos: start,
             mac_keys: MacShortcuts::new(),
             held_here: false,
+            primary_down: false,
+            crossed_holding: false,
         }
     }
 
@@ -162,6 +169,38 @@ impl<S: InputSink, O: Outbox> Forwarder<S, O> {
     pub fn out(&self) -> &O {
         &self.out
     }
+    pub fn set_config(&mut self, cfg: FwdConfig) {
+        let active = match &self.mode {
+            Mode::RemoteOut { peer, seq, .. } | Mode::RemoteIn { peer, seq, .. } => Some((peer.clone(), *seq)),
+            Mode::Local => None,
+        };
+        if let Some((peer, seq)) = active {
+            let old = self.cfg.peers.iter().find(|p| p.name == peer);
+            let new = cfg.peers.iter().find(|p| p.name == peer);
+            if old != new {
+                let was_up = self.up.contains(&peer);
+                // The link stays up, so the other end must hear that the switch is over: otherwise it keeps
+                // driving us, or keeps the keys we injected held down.
+                if was_up {
+                    self.out.send(&peer, Msg::Release { seq, reason: Reason::TopologyChange });
+                }
+                self.link_down(&peer);
+                if was_up && new.is_some() {
+                    self.up.insert(peer);
+                }
+            }
+        }
+        self.up.retain(|peer| cfg.peers.iter().any(|p| &p.name == peer));
+        self.last_enter.retain(|peer, _| cfg.peers.iter().any(|p| &p.name == peer));
+        if self.cfg.policy != cfg.policy {
+            self.sw = SwitchState::new(self.last_pos);
+            if let Mode::RemoteIn { pos, ret, .. } = &mut self.mode {
+                *ret = SwitchState::new(*pos);
+            }
+        }
+        self.cfg = cfg;
+    }
+
     /// A real topology change ends any session that spans it. `RemoteOut` releases the peer and brings the
     /// cursor home onto a display that still exists; `RemoteIn` pulls the virtual cursor back onto one.
     /// Callers refresh periodically, so an identical list is not a change.
@@ -245,6 +284,7 @@ impl<S: InputSink, O: Outbox> Forwarder<S, O> {
     pub fn on_captured(&mut self, ev: CapturedEvent, now_ms: u64) -> Disposition {
         if let CapturedEvent::Button { button: PRIMARY_BUTTON, down } = ev {
             let local = matches!(self.mode, Mode::Local);
+            self.primary_down = down;
             self.held_here = down && local;
             if local {
                 self.sink.primary(down);
@@ -263,7 +303,16 @@ impl<S: InputSink, O: Outbox> Forwarder<S, O> {
             }
         }
         match self.mode.clone() {
-            Mode::RemoteOut { peer, seq, .. } => {
+            Mode::RemoteOut { peer, seq, exit_pos } => {
+                // The switch chord also comes home: a way back that does not depend on the peer.
+                if let CapturedEvent::Key { hid, down } = ev {
+                    let mods = self.keys.mods();
+                    if decide(&self.cfg.policy, &mut self.sw, SwitchEvent::Key { hid, down, mods }, now_ms) {
+                        self.out.send(&peer, Msg::Release { seq, reason: Reason::UserEscape });
+                        self.restore_local(exit_pos);
+                        return Disposition::Swallow;
+                    }
+                }
                 let keys = self.cfg.peers.iter().find(|p| p.name == peer).map_or(KeyMap::None, |p| p.keys);
                 let mac = keys == KeyMap::Mac;
                 let key_msg = |(hid, down): (u16, bool)| Msg::Key { seq, hid, down, repeat: false };
@@ -342,13 +391,20 @@ impl<S: InputSink, O: Outbox> Forwarder<S, O> {
     }
 
     fn on_enter(&mut self, peer: &str, seq: u32, edge: Edge, frac: u16, pressed: &[u16]) {
-        if !self.cfg.peers.iter().any(|p| p.name == peer) || !matches!(self.mode, Mode::Local) {
-            return;
-        }
         if let Some(&last) = self.last_enter.get(peer) {
             if (seq.wrapping_sub(last) as i32) <= 0 {
-                return;
+                return; // a duplicate of a session already handled
             }
+        }
+        // The same peer starting a newer session means it considers the old one over.
+        if matches!(&self.mode, Mode::RemoteIn { peer: p, .. } if p == peer) {
+            self.leave_remote_in();
+        }
+        if !self.cfg.peers.iter().any(|p| p.name == peer) || !matches!(self.mode, Mode::Local) {
+            // The sender has already hidden its cursor and grabbed its keyboard and mouse. Unanswered, it
+            // would keep them until a restart; refused, it comes home at once.
+            self.out.send(peer, Msg::Release { seq, reason: Reason::Busy });
+            return;
         }
         self.last_enter.insert(peer.to_string(), seq);
         let Ok(pos) = entry_point(&self.displays, edge, frac) else {
@@ -444,6 +500,7 @@ impl<S: InputSink, O: Outbox> Forwarder<S, O> {
 
     fn enter_out(&mut self, idx: usize, pos: Point, skip_key: Option<u16>) {
         let spec = self.cfg.peers[idx].clone();
+        self.crossed_holding = self.held_here;
         self.held_here = false;
         self.sink.drag_away(&spec.name);
         self.next_seq = self.next_seq.wrapping_add(1);
@@ -493,6 +550,11 @@ impl<S: InputSink, O: Outbox> Forwarder<S, O> {
         self.sink.set_grab(false);
         self.sink.show();
         self.sink.warp(at);
+        // Without this release the system here keeps the button down: clicks do nothing and a drag loop
+        // eats the keys, until someone posts an up. Still held now: the real release comes, and passes.
+        if std::mem::take(&mut self.crossed_holding) && !self.primary_down {
+            self.sink.button(PRIMARY_BUTTON, false);
+        }
         self.go_local(at);
     }
 
@@ -730,6 +792,61 @@ mod tests {
         assert!(matches!(f.mode(), Mode::RemoteOut { .. }), "{:?}", f.mode());
     }
 
+    /// A press made here that crossed (a drag) had its release go to the peer. Coming home, this machine
+    /// still has the button down unless it is told otherwise: clicks and keys stop working here.
+    #[test]
+    fn a_press_that_crossed_is_released_here_when_control_comes_back() {
+        // Every way home: the peer's Leave, the peer's Release, the link dropping, the switch chord.
+        type Home = fn(&mut Forwarder<Rec, Mail>, u32);
+        let homes: [(&str, Home); 4] = [
+            ("leave", |f, seq| f.on_msg("b", Msg::Leave { seq, edge: Edge::Right, frac: 0x8000 }, 500)),
+            ("release", |f, seq| f.on_msg("b", Msg::Release { seq, reason: Reason::UserEscape }, 500)),
+            ("link down", |f, _| f.link_down("b")),
+            ("emergency", |f, _| {
+                emergency_chord(f);
+            }),
+        ];
+        for (how, home) in homes {
+            let mut f = fwd(Edge::Right);
+            f.on_captured(CapturedEvent::Button { button: LEFT, down: true }, 0);
+            let seq = go_out(&mut f);
+            f.on_captured(CapturedEvent::Button { button: LEFT, down: false }, 300); // goes to the peer
+            f.sink_mut().0.clear();
+            home(&mut f, seq);
+            assert!(matches!(f.mode(), Mode::Local), "{how}: {:?}", f.mode());
+            assert_eq!(f.sink().0.iter().filter(|e| **e == Fx::Button(LEFT, false)).count(), 1, "{how}: {:?}", f.sink().0);
+            // Once: going out and back again without a press owes nothing.
+            f.link_up("b");
+            f.on_cursor(Point { x: W / 2, y: 450 }, 600);
+            let seq = match f.mode() {
+                Mode::Local => {
+                    dwell(&mut f, right_edge(), 700);
+                    match f.mode() {
+                        Mode::RemoteOut { seq, .. } => *seq,
+                        m => panic!("{how}: {m:?}"),
+                    }
+                }
+                m => panic!("{how}: {m:?}"),
+            };
+            f.sink_mut().0.clear();
+            f.on_msg("b", Msg::Leave { seq, edge: Edge::Right, frac: 0x8000 }, 1000);
+            assert!(!f.sink().0.contains(&Fx::Button(LEFT, false)), "{how}: {:?}", f.sink().0);
+        }
+    }
+
+    /// Still held when control comes back: the real release is on its way and reaches the system, so no
+    /// release is made up (it would end the drag early).
+    #[test]
+    fn a_press_still_held_on_the_way_home_is_left_to_the_real_release() {
+        let mut f = fwd(Edge::Right);
+        f.on_captured(CapturedEvent::Button { button: LEFT, down: true }, 0);
+        let seq = go_out(&mut f);
+        f.sink_mut().0.clear();
+        f.on_msg("b", Msg::Leave { seq, edge: Edge::Right, frac: 0x8000 }, 500);
+        assert!(!f.sink().0.contains(&Fx::Button(LEFT, false)), "{:?}", f.sink().0);
+        assert_eq!(f.on_captured(CapturedEvent::Button { button: LEFT, down: false }, 600), Disposition::Pass);
+    }
+
     /// A press made on the peer that comes home still held (a drag from the peer) may go back out: only a
     /// press made here waits at the edge.
     #[test]
@@ -802,6 +919,58 @@ mod tests {
         assert!(matches!(f.mode(), Mode::Local));
         f.on_captured(CapturedEvent::Button { button: LEFT, down: false }, 400);
         assert_eq!(f.sink().0.last(), Some(&Fx::Primary(false)));
+    }
+
+    /// A machine that cannot take a session (it is driving another, or being driven) must say so. The
+    /// sender has already hidden its cursor and grabbed its keyboard and mouse; with no answer it keeps them
+    /// until a restart.
+    #[test]
+    fn an_enter_that_cannot_be_taken_is_refused_so_the_sender_comes_home() {
+        let mut busy = fwd(Edge::Right);
+        go_out(&mut busy); // driving its own peer
+        let before = busy.out().0.len();
+        busy.on_msg("b", Msg::Enter { seq: 77, edge: Edge::Left, frac: 0x8000, mods: ModifierSet(0), pressed: vec![] }, 10);
+        assert!(matches!(busy.mode(), Mode::RemoteOut { .. }), "the busy machine keeps its own session");
+        let replies: Vec<&Msg> = busy.out().0[before..].iter().map(|(_, m)| m).collect();
+        assert!(matches!(replies[..], [Msg::Release { seq: 77, .. }]), "{replies:?}");
+        // The sender, on that reply, is home.
+        let mut sender = fwd(Edge::Right);
+        let seq = go_out(&mut sender);
+        let reply = match replies[0] { Msg::Release { reason, .. } => Msg::Release { seq, reason: *reason }, _ => unreachable!() };
+        sender.on_msg("b", reply, 20);
+        assert!(matches!(sender.mode(), Mode::Local));
+        // An Enter from a machine this one does not know is refused the same way.
+        let mut stranger = fwd(Edge::Right);
+        stranger.on_msg("nobody", Msg::Enter { seq: 5, edge: Edge::Left, frac: 0x8000, mods: ModifierSet(0), pressed: vec![] }, 0);
+        assert!(matches!(stranger.out().0.last(), Some((p, Msg::Release { seq: 5, .. })) if p == "nobody"));
+    }
+
+    /// The peer driving us starts a newer session (it came home and went out again before our side saw the
+    /// end): that one is taken, with whatever the old one held let go first, instead of being refused.
+    #[test]
+    fn a_newer_session_from_the_driving_peer_replaces_the_old_one() {
+        let mut f = fwd(Edge::Left);
+        go_in(&mut f, 1, vec![]);
+        f.on_msg("b", Msg::Key { seq: 1, hid: 0x04, down: true, repeat: false }, 5);
+        f.on_msg("b", Msg::Enter { seq: 2, edge: Edge::Left, frac: 0x8000, mods: ModifierSet(0), pressed: vec![] }, 10);
+        assert!(matches!(f.mode(), Mode::RemoteIn { seq: 2, .. }), "{:?}", f.mode());
+        assert!(f.sink().0.contains(&Fx::Key(0x04, false)), "the old session's key is released");
+        assert!(!msgs(&f).iter().any(|m| matches!(m, Msg::Release { .. })), "not refused");
+    }
+
+    /// The switch chord also brings control home, so there is a known way back when the peer never hands it
+    /// back (it cannot reach its exit edge, or it is not answering).
+    #[test]
+    fn the_switch_chord_brings_control_home_from_the_peer() {
+        let mut f = fwd(Edge::Right);
+        let seq = go_out(&mut f);
+        for h in [CTRL, ALT, GUI] {
+            key(&mut f, h, true);
+        }
+        assert_eq!(key(&mut f, crate::switch::HID_S, true), Disposition::Swallow, "the chord key never reaches the peer");
+        assert!(matches!(f.mode(), Mode::Local), "{:?}", f.mode());
+        assert!(msgs(&f).iter().any(|m| matches!(m, Msg::Release { seq: s, .. } if *s == seq)), "{:?}", msgs(&f));
+        assert!(!msgs(&f).iter().any(|m| matches!(m, Msg::Key { hid: crate::switch::HID_S, .. })));
     }
 
     #[test]
@@ -1029,6 +1198,118 @@ mod tests {
         for want in [Fx::Key(0x04, false), Fx::Key(0xE1, false), Fx::Button(2, false), Fx::Assoc(true)] {
             assert!(tail.contains(&want), "missing {want:?} in {tail:?}");
         }
+    }
+
+    #[test]
+    fn removing_the_driven_peer_brings_control_home() {
+        let mut f = fwd(Edge::Right);
+        go_out(&mut f);
+        f.set_config(FwdConfig { peers: vec![], ..cfg(Edge::Right) });
+        assert!(matches!(f.mode(), Mode::Local));
+        assert!(!f.up.contains("b"));
+        assert!(f.sink().0.contains(&Fx::Grab(false)) && f.sink().0.contains(&Fx::Show));
+        assert_eq!(f.on_captured(CapturedEvent::Motion { dx: 1, dy: 1 }, 300), Disposition::Pass);
+    }
+
+    #[test]
+    fn changing_the_driven_peers_key_map_brings_control_home_but_keeps_its_link() {
+        let mut f = fwd(Edge::Right);
+        go_out(&mut f);
+        let mut changed = cfg(Edge::Right);
+        changed.peers[0].keys = KeyMap::Position;
+        let seq = match f.mode() { Mode::RemoteOut { seq, .. } => *seq, other => panic!("{other:?}") };
+        f.set_config(changed);
+        assert!(matches!(f.mode(), Mode::Local));
+        assert!(f.up.contains("b"));
+        assert!(msgs(&f).contains(&Msg::Release { seq, reason: Reason::TopologyChange }), "the peer must hear the switch ended: {:?}", msgs(&f));
+        assert!(f.sink().0.contains(&Fx::Grab(false)) && f.sink().0.contains(&Fx::Show));
+    }
+
+    #[test]
+    fn changing_another_peers_edge_keeps_the_active_session() {
+        let mut original = cfg(Edge::Right);
+        original.peers.push(PeerSpec { name: "c".into(), edge: Edge::Left, keys: KeyMap::None });
+        let mut f = Forwarder::new(original.clone(), screen(), Rec::default(), Mail::default());
+        f.link_up("b");
+        f.link_up("c");
+        let seq = go_out(&mut f);
+        original.peers[1].edge = Edge::Top;
+        f.set_config(original);
+        assert!(matches!(f.mode(), Mode::RemoteOut { peer, seq: s, .. } if peer == "b" && *s == seq));
+        assert!(f.up.contains("b") && f.up.contains("c"));
+        assert!(!f.sink().0.contains(&Fx::Grab(false)));
+    }
+
+    #[test]
+    fn removing_the_driving_peer_releases_every_injected_key_and_button() {
+        let mut f = fwd(Edge::Left);
+        go_in(&mut f, 1, vec![]);
+        for hid in [0x04, 0xE1] {
+            f.on_msg("b", Msg::Key { seq: 1, hid, down: true, repeat: false }, 1);
+        }
+        for button in [1, 2] {
+            f.on_msg("b", Msg::Button { seq: 1, button, down: true }, 1);
+        }
+        let before = f.sink().0.len();
+        f.set_config(FwdConfig { peers: vec![], ..cfg(Edge::Left) });
+        assert!(matches!(f.mode(), Mode::Local));
+        let tail = &f.sink().0[before..];
+        for want in [Fx::Key(0x04, false), Fx::Key(0xE1, false), Fx::Button(1, false), Fx::Button(2, false), Fx::Assoc(true)] {
+            assert!(tail.contains(&want), "missing {want:?} in {tail:?}");
+        }
+        assert!(f.inj_keys.is_empty() && f.inj_btn.is_empty());
+    }
+
+    #[test]
+    fn added_peer_can_be_switched_to_after_link_up() {
+        let mut f = fwd(Edge::Right);
+        let mut changed = cfg(Edge::Right);
+        changed.peers.push(PeerSpec { name: "c".into(), edge: Edge::Left, keys: KeyMap::None });
+        f.set_config(changed);
+        f.link_up("c");
+        dwell(&mut f, left_edge(), 0);
+        assert!(matches!(f.mode(), Mode::RemoteOut { peer, .. } if peer == "c"));
+        assert!(matches!(f.out().0.last(), Some((peer, Msg::Enter { .. })) if peer == "c"));
+    }
+
+    #[test]
+    fn policy_change_restarts_an_active_dwell() {
+        let mut f = fwd(Edge::Right);
+        f.on_cursor(right_edge(), 0);
+        let mut changed = cfg(Edge::Right);
+        changed.policy.dwell_ms = 250;
+        f.set_config(changed);
+        f.tick(200);
+        assert!(matches!(f.mode(), Mode::Local));
+        f.tick(449);
+        assert!(matches!(f.mode(), Mode::Local));
+        f.tick(450);
+        assert!(matches!(f.mode(), Mode::RemoteOut { .. }));
+    }
+
+    #[test]
+    fn policy_change_restarts_remote_in_return_dwell() {
+        let mut f = fwd(Edge::Left);
+        go_in(&mut f, 1, vec![]);
+        f.on_msg("b", Msg::MotionRel { seq: 1, dx: -100, dy: 0 }, 1000);
+        let mut changed = cfg(Edge::Left);
+        changed.policy.dwell_ms = 250;
+        f.set_config(changed);
+        f.tick(1200);
+        assert!(matches!(f.mode(), Mode::RemoteIn { .. }));
+        f.tick(1449);
+        assert!(matches!(f.mode(), Mode::RemoteIn { .. }));
+        f.tick(1450);
+        assert!(matches!(f.mode(), Mode::Local));
+    }
+
+    #[test]
+    fn unchanged_policy_keeps_an_active_dwell() {
+        let mut f = fwd(Edge::Right);
+        f.on_cursor(right_edge(), 0);
+        f.set_config(cfg(Edge::Right));
+        f.tick(200);
+        assert!(matches!(f.mode(), Mode::RemoteOut { .. }));
     }
 
     #[test]

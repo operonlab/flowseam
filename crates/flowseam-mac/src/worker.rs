@@ -1,7 +1,7 @@
 //! Worker entry (design §5): runs the capture tap until told to stop, then writes `CLEAN` on stdout.
 //!
-//! Stop protocol: stdin EOF or SIGTERM ends the run normally. Both go through the same path:
-//! stop the tap, restore the cursor, then write `CLEAN\n`. A tap fault other than the emergency
+//! Stop protocol: stdin EOF, SIGTERM or a quit Apple event ends the run normally. All go through the same path:
+//! stop the tap, restore the cursor, then write `CLEAN\n` (`QUIT\n` for the Apple event). A tap fault other than the emergency
 //! chord (which has already restored the cursor) returns an error and writes no marker, so the
 //! supervisor treats it as a death and restores again.
 //!
@@ -9,7 +9,7 @@
 use crate::backend::{MacBackend, SysCursorOs};
 use crate::ffi;
 use crate::grab::{CursorOs, GrabGuard};
-use crate::supervisor::CLEAN;
+use crate::supervisor::{CLEAN, QUIT};
 use crate::links::{DragCfg, LinkParams, Links, RouteOutbox};
 use crate::sink::EmitSink;
 use crate::switch_gate::TapConfig;
@@ -23,7 +23,7 @@ use std::time::Instant;
 use flowseam_core::backend::{BackendError, CaptureFault, CaptureSink, CapturedEvent, Disposition, InputCapture};
 use flowseam_core::config::Config;
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -36,15 +36,63 @@ const ERR_CLEAN_WRITE: i32 = -8;
 const ERR_IDENTITY: i32 = -9;
 const ERR_LINKS: i32 = -10;
 const ERR_PANIC: i32 = -11;
+const ERR_STUCK: i32 = -12;
+const GRANTS_EVERY: Duration = Duration::from_secs(1);
+
+/// The first privacy grant this process is missing now, if any. `Unknown` is not a revocation.
+fn missing_grant() -> Option<String> {
+    use flowseam_core::backend::Preflight;
+    [sys::capture_preflight(), sys::emit_preflight()].into_iter().find_map(|p| match p {
+        Preflight::Missing(what) => Some(format!("{what:?}")),
+        _ => None,
+    })
+}
+/// How long the main loop may go without a turn before the worker gives up. A turn takes 50 ms; one that
+/// cannot take the forwarder's lock for this long means the event tap is blocked too.
+const STALL_LIMIT: Duration = Duration::from_secs(3);
+/// How long the stop after a quit Apple event may take before the worker exits without it.
+const QUIT_LIMIT: Duration = Duration::from_secs(5);
 /// How far the hidden cursor may wander from the main display's center before it is warped back: well
 /// inside even a small display, so it never reaches an edge, a corner or the Dock.
 const RECENTER_PX: i32 = 256;
 
 static TERM: AtomicBool = AtomicBool::new(false);
+static QUIT_ASKED: AtomicBool = AtomicBool::new(false);
 
 /// Async-signal-safe: one atomic store.
 extern "C" fn on_term(_sig: i32) {
     TERM.store(true, Ordering::SeqCst);
+}
+
+/// The quit Apple event: a script or a quit-all tool asking the app to quit, or logout. The worker shares the app's
+/// bundle ID, so the event can reach it rather than the window. AppKit's own handler exits on the spot, skipping the
+/// restore, and the window then starts a new worker; this ends the run the way stdin EOF does and says why.
+extern "C" fn on_quit_event(_event: *const std::ffi::c_void, _reply: *mut std::ffi::c_void, _refcon: *mut std::ffi::c_void) -> i16 {
+    QUIT_ASKED.store(true, Ordering::SeqCst);
+    0
+}
+
+/// What the worker writes on a clean end: QUIT when the system asked the app to quit, so the window quits too.
+fn end_marker(quit_asked: bool) -> &'static [u8] {
+    if quit_asked { QUIT } else { CLEAN }
+}
+
+/// Watch the main loop's heartbeat (`beat`, in `clock` milliseconds) and call `on_stall` once if it stops
+/// for `limit`. A stuck worker can hold the grab (cursor hidden, mouse detached, keys swallowed) with nothing
+/// left running to undo it: the input lock that otherwise only a restart ends. Exiting ends it, because the
+/// event tap and the cursor-hiding window go with the process and the supervisor restores the cursor.
+pub fn spawn_watchdog(beat: Arc<AtomicU64>, clock: Clock, limit: Duration, on_stall: impl FnOnce() + Send + 'static) {
+    thread::Builder::new()
+        .name("flowseam-watchdog".into())
+        .spawn(move || loop {
+            thread::sleep(limit / 6);
+            let since = clock().saturating_sub(beat.load(Ordering::SeqCst));
+            if since >= limit.as_millis() as u64 {
+                on_stall();
+                return;
+            }
+        })
+        .expect("spawn watchdog");
 }
 
 /// The real cursor layer, for the parent's supervisor to restore the cursor after a worker death.
@@ -72,7 +120,7 @@ impl CaptureSink for WorkerSink {
 fn panic_hook(guard: GrabGuard, stop: Arc<AtomicBool>, panicked: Arc<AtomicBool>) -> Arc<dyn Fn() + Send + Sync> {
     Arc::new(move || {
         if let Err(e) = guard.restore() {
-            eprintln!("flowseam worker: restore after panic failed: {e:?}");
+            flowseam_core::log::line(&format!("flowseam worker: restore after panic failed: {e:?}"));
         }
         panicked.store(true, Ordering::SeqCst);
         stop.store(true, Ordering::SeqCst);
@@ -85,7 +133,7 @@ fn link_params(cfg: &Config) -> Result<LinkParams, BackendError> {
     let dir = std::path::PathBuf::from(std::env::var_os("HOME").ok_or(BackendError::Os { code: ERR_NO_HOME, api: "HOME unset: no identity dir" })?)
         .join(".config/flowseam/identity");
     let identity = Identity::load_or_create(&dir).map_err(|e| {
-        eprintln!("flowseam worker: identity: {e:?}");
+        flowseam_core::log::line(&format!("flowseam worker: identity: {e:?}"));
         BackendError::Os { code: ERR_IDENTITY, api: "identity load_or_create" }
     })?;
     let mut peers = Vec::new();
@@ -108,6 +156,8 @@ fn link_params(cfg: &Config) -> Result<LinkParams, BackendError> {
         peers,
         listen: cfg.listen.parse().map_err(|_| bad("listen addr"))?,
         timing: Timing::default(),
+        // Beside the identity above and the config the GUI reads it next to (crate flowseam's config_dir).
+        status: std::env::var_os("HOME").map(|h| flowseam_core::status::status_path(&std::path::PathBuf::from(h).join(".config/flowseam/config.toml"))),
     })
 }
 
@@ -119,15 +169,15 @@ pub fn run(cfg: &Config) -> Result<(), BackendError> {
 fn run_with<R: Read + Send + 'static, W: Write>(cfg: &Config, stdin: R, mut out: W) -> Result<(), BackendError> {
     // Refuse before touching the OS: every peer must be paired.
     cfg.validate_for_run().map_err(|e| {
-        eprintln!("flowseam worker: config not runnable: {e:?}");
+        flowseam_core::log::line(&format!("flowseam worker: config not runnable: {e:?}"));
         BackendError::Os { code: ERR_CONFIG, api: "config: validate_for_run" }
     })?;
     let tap_cfg = TapConfig::from_config(cfg).map_err(|e| {
-        eprintln!("flowseam worker: bad switch config: {e}");
+        flowseam_core::log::line(&format!("flowseam worker: bad switch config: {e}"));
         BackendError::Os { code: ERR_CONFIG, api: "config: switch chord" }
     })?;
     let fwd_cfg = FwdConfig::from_config(cfg).map_err(|e| {
-        eprintln!("flowseam worker: bad switch config: {e}");
+        flowseam_core::log::line(&format!("flowseam worker: bad switch config: {e}"));
         BackendError::Os { code: ERR_CONFIG, api: "config: switch chord" }
     })?;
     let lock = MacBackend::default_lock_path()
@@ -135,6 +185,7 @@ fn run_with<R: Read + Send + 'static, W: Write>(cfg: &Config, stdin: R, mut out:
     let link_params = if cfg.peers.is_empty() { None } else { Some(link_params(cfg)?) };
 
     TERM.store(false, Ordering::SeqCst);
+    QUIT_ASKED.store(false, Ordering::SeqCst);
     let stop = Arc::new(AtomicBool::new(false));
     let panicked = Arc::new(AtomicBool::new(false));
     let fault = Arc::new(Mutex::new(None));
@@ -150,11 +201,12 @@ fn run_with<R: Read + Send + 'static, W: Write>(cfg: &Config, stdin: R, mut out:
         // Same volume as Downloads on a normal Mac, so a drop is a rename.
         staging: home.join("Library/Caches/Flowseam/drags"),
         dest: home.join("Downloads"),
+        native: Some(Arc::new(crate::native::MacNativeDrop)),
     };
-    let cancel_drag = Box::new(|| match sys::cancel_drag_in_front() {
-        Ok(Some(pid)) => eprintln!("flowseam files: drag ended here (Escape to pid {pid})"),
-        Ok(None) => eprintln!("flowseam files: no active app found; Escape sent through the HID stream"),
-        Err(e) => eprintln!("flowseam files: could not end the drag here: {e}"),
+    let cancel_drag = Box::new(|at| match sys::cancel_drag(at) {
+        Ok(Some((pid, via))) => flowseam_core::log::line(&format!("flowseam files: drag ended here (Escape to pid {pid}, {via}, pressed at {at:?})")),
+        Ok(None) => flowseam_core::log::line("flowseam files: no active app found; Escape sent through the HID stream"),
+        Err(e) => flowseam_core::log::line(&format!("flowseam files: could not end the drag here: {e}")),
     });
     let sink = EmitSink::new(MacBackend::new(lock), guard.clone()).with_drags(drags.hub.clone(), cancel_drag);
     let fwd: Shared<MacBackend, RouteOutbox> = Arc::new(Mutex::new(Forwarder::new(fwd_cfg, displays, sink, routes.clone())));
@@ -180,7 +232,7 @@ fn run_with<R: Read + Send + 'static, W: Write>(cfg: &Config, stdin: R, mut out:
             match Links::start(p, fwd.clone(), routes, clock.clone(), on_panic, Some(Arc::new(sys::MacClipboard)), Some(drags)) {
                 Ok(l) => Some(l),
                 Err(e) => {
-                    eprintln!("flowseam worker: links failed to start: {e:?}");
+                    flowseam_core::log::line(&format!("flowseam worker: links failed to start: {e:?}"));
                     let _ = backend.stop();
                     let _ = guard.restore();
                     return Err(BackendError::Os { code: ERR_LINKS, api: "links start" });
@@ -196,14 +248,83 @@ fn run_with<R: Read + Send + 'static, W: Write>(cfg: &Config, stdin: R, mut out:
         eof_stop.store(true, Ordering::SeqCst);
     });
 
-    while !stop.load(Ordering::SeqCst) && !TERM.load(Ordering::SeqCst) {
+    let beat = Arc::new(AtomicU64::new(clock()));
+    spawn_watchdog(beat.clone(), clock.clone(), STALL_LIMIT, || {
+        flowseam_core::log::line(&format!("flowseam worker: the main loop has not turned for {STALL_LIMIT:?}; exiting so input is released"));
+        std::process::exit(ERR_STUCK);
+    });
+    let timer_fwd = fwd.clone();
+    let timer_beat = beat.clone();
+    let timer_clock = clock.clone();
+    // AppKit's drag tracking loop holds the main thread; this timer keeps the beat and forwarder tick going in tracking mode.
+    // SAFETY: this worker runs on the main thread and owns its current run loop.
+    let heartbeat = crate::heartbeat::keep_beating(unsafe { ffi::CFRunLoopGetCurrent() }, Duration::from_millis(50), Box::new(move || {
+        // try_lock: this runs on the main thread, which may already hold the forwarder if a call under it spins the
+        // run loop; waiting here would deadlock that thread. The next beat ticks instead.
+        match timer_fwd.try_lock() {
+            Ok(mut f) => f.tick(timer_clock()),
+            Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner().tick(timer_clock()),
+            Err(std::sync::TryLockError::WouldBlock) => {}
+        }
+        timer_beat.store(timer_clock(), Ordering::SeqCst);
+    }));
+    let mut grants_checked = Instant::now();
+    let mut status_checked = Instant::now() - Duration::from_secs(1);
+    let mut was_grabbed = guard.is_grabbed();
+    // AppKit installs its own quit handler as it starts; replace it before any event is dispatched.
+    crate::front::start();
+    // SAFETY: a plain function pointer that only stores to an atomic; the handler table is process-wide.
+    let err = unsafe { ffi::AEInstallEventHandler(ffi::kCoreEventClass, ffi::kAEQuitApplication, on_quit_event, std::ptr::null_mut(), 0) };
+    if err != 0 {
+        flowseam_core::log::line(&format!("flowseam worker: could not take over the quit Apple event (OSErr {err}); one sent to the app will end this worker without its restore"));
+    }
+    while !stop.load(Ordering::SeqCst) && !TERM.load(Ordering::SeqCst) && !QUIT_ASKED.load(Ordering::SeqCst) {
         fwd.lock().unwrap_or_else(|e| e.into_inner()).tick(clock());
+        beat.store(clock(), Ordering::SeqCst);
+        let grabbed = guard.is_grabbed();
+        if grabbed != was_grabbed {
+            flowseam_core::log::line(if grabbed { "flowseam worker: cursor grabbed" } else { "flowseam worker: cursor restored" });
+            was_grabbed = grabbed;
+        }
+        if cfg.peers.is_empty() && status_checked.elapsed() >= Duration::from_secs(1) {
+            status_checked = Instant::now();
+            if let Some(home) = std::env::var_os("HOME") {
+                let path = flowseam_core::status::status_path(&std::path::PathBuf::from(home).join(".config/flowseam/config.toml"));
+                if let Err(e) = flowseam_core::status::write(&path, &flowseam_core::status::LinkStatus { written_ms: flowseam_core::status::now_ms(), peers: Vec::new() }) {
+                    flowseam_core::log::line(&format!("flowseam worker: status write: {e}"));
+                }
+            }
+        }
+        // A grant taken back while running (switched off in System Settings, or not carried over by an
+        // update) leaves the tap deaf with the cursor still hidden and the mouse detached: input locked.
+        // End cleanly instead; the normal exit path restores everything.
+        if grants_checked.elapsed() >= GRANTS_EVERY {
+            grants_checked = Instant::now();
+            if let Some(missing) = missing_grant() {
+                flowseam_core::log::line(&format!("flowseam worker: {missing} was taken away while running; stopping and restoring input"));
+                break;
+            }
+        }
         if let Err(e) = guard.recenter_if_far(RECENTER_PX) {
-            eprintln!("flowseam worker: re-centering the hidden cursor failed: {e:?}");
+            flowseam_core::log::line(&format!("flowseam worker: re-centering the hidden cursor failed: {e:?}"));
         }
         // The sleep; also where a hide or show asked for on another thread is applied (AppKit is main-thread).
         crate::front::pump(Duration::from_millis(50));
     }
+    drop(heartbeat);
+    if QUIT_ASKED.load(Ordering::SeqCst) {
+        flowseam_core::log::line("flowseam worker: the system asked the app to quit");
+        // Logout waits for this process, so a stop that hangs must not hold it. Exiting still releases the tap and
+        // the cursor-hiding window; the window restores the cursor after an end without a marker.
+        thread::spawn(|| {
+            thread::sleep(QUIT_LIMIT);
+            flowseam_core::log::line(&format!("flowseam worker: still stopping {QUIT_LIMIT:?} after a quit; exiting"));
+            std::process::exit(ERR_STUCK);
+        });
+    }
+    // Shutting down can take longer than a turn (links join, the grab is restored): not a stall.
+    flowseam_core::log::line("flowseam worker: stopping");
+    beat.store(u64::MAX, Ordering::SeqCst);
 
     // Links first: each ended session runs link_down, which frees a held grab or injected keys.
     if let Some(l) = links {
@@ -211,20 +332,22 @@ fn run_with<R: Read + Send + 'static, W: Write>(cfg: &Config, stdin: R, mut out:
     }
     let stopped = backend.stop();
     if let Err(e) = guard.restore() {
-        eprintln!("flowseam worker: final cursor restore failed: {e:?}");
+        flowseam_core::log::line(&format!("flowseam worker: final cursor restore failed: {e:?}"));
+    } else if was_grabbed {
+        flowseam_core::log::line("flowseam worker: cursor restored on stop");
     }
     // Hand the front back now; after exit the system would pick an app, not necessarily the one it was.
     crate::front::pump(Duration::ZERO);
     stopped?;
     if panicked.load(Ordering::SeqCst) {
-        eprintln!("flowseam worker: a link thread panicked; cursor restored, no CLEAN marker");
+        flowseam_core::log::line("flowseam worker: a link thread panicked; cursor restored, no CLEAN marker");
         return Err(BackendError::Os { code: ERR_PANIC, api: "link thread panic" });
     }
     let seen = *fault.lock().unwrap_or_else(|e| e.into_inner());
     match seen {
-        None | Some(CaptureFault::Emergency) => write_clean(&mut out),
+        None | Some(CaptureFault::Emergency) => write_marker(&mut out, end_marker(QUIT_ASKED.load(Ordering::SeqCst))),
         Some(f) => {
-            eprintln!("flowseam worker: tap fault {f:?}; no CLEAN marker");
+            flowseam_core::log::line(&format!("flowseam worker: tap fault {f:?}; no CLEAN marker"));
             Err(BackendError::Os { code: ERR_TAP_FAULT, api: "tap fault" })
         }
     }
@@ -232,9 +355,9 @@ fn run_with<R: Read + Send + 'static, W: Write>(cfg: &Config, stdin: R, mut out:
 
 /// The normal-exit marker. A failed write is an error: without the marker the supervisor
 /// would restore a cursor that is already fine, and the caller must know that.
-fn write_clean(out: &mut impl Write) -> Result<(), BackendError> {
+fn write_marker(out: &mut impl Write, marker: &[u8]) -> Result<(), BackendError> {
     let io = |_| BackendError::Os { code: ERR_CLEAN_WRITE, api: "stdout: CLEAN marker" };
-    out.write_all(CLEAN).map_err(io)?;
+    out.write_all(marker).map_err(io)?;
     out.write_all(b"\n").map_err(io)?;
     out.flush().map_err(io)
 }
@@ -246,8 +369,20 @@ mod tests {
     #[test]
     fn clean_marker_is_clean_plus_newline() {
         let mut buf = Vec::new();
-        write_clean(&mut buf).unwrap();
+        write_marker(&mut buf, CLEAN).unwrap();
         assert_eq!(buf, b"CLEAN\n");
+    }
+
+    /// The handler AppKit would otherwise run exits on the spot; this one only asks the loop to end, and the end
+    /// it leads to is the QUIT marker, which the window takes as "quit" rather than "start a new worker".
+    #[test]
+    fn a_quit_event_asks_to_stop_and_ends_with_the_quit_marker() {
+        assert_eq!(end_marker(false), CLEAN);
+        QUIT_ASKED.store(false, Ordering::SeqCst);
+        assert_eq!(on_quit_event(std::ptr::null(), std::ptr::null_mut(), std::ptr::null_mut()), 0, "noErr: the sender sees success");
+        assert!(QUIT_ASKED.load(Ordering::SeqCst));
+        assert_eq!(end_marker(QUIT_ASKED.load(Ordering::SeqCst)), QUIT);
+        QUIT_ASKED.store(false, Ordering::SeqCst);
     }
 
     #[test]
@@ -261,7 +396,7 @@ mod tests {
                 Ok(())
             }
         }
-        assert!(write_clean(&mut Broken).is_err());
+        assert!(write_marker(&mut Broken, CLEAN).is_err());
     }
 
     #[test]
@@ -316,5 +451,50 @@ mod tests {
         assert!(!guard.is_grabbed(), "cursor must be restored");
         assert!(log.count("show") >= 1);
         assert!(stop.load(Ordering::SeqCst) && panicked.load(Ordering::SeqCst));
+    }
+}
+
+#[cfg(test)]
+mod watchdog_tests {
+    use super::*;
+    use std::sync::mpsc::channel;
+
+    fn clock() -> Clock {
+        let t0 = Instant::now();
+        Arc::new(move || t0.elapsed().as_millis() as u64)
+    }
+
+    #[test]
+    fn a_stopped_heartbeat_trips_the_watchdog_once() {
+        let c = clock();
+        let beat = Arc::new(AtomicU64::new(c()));
+        let (tx, rx) = channel();
+        spawn_watchdog(beat, c, Duration::from_millis(120), move || tx.send(()).unwrap());
+        assert!(rx.recv_timeout(Duration::from_secs(2)).is_ok(), "never tripped");
+        assert!(rx.recv_timeout(Duration::from_millis(400)).is_err(), "tripped twice");
+    }
+
+    #[test]
+    fn a_turning_main_loop_never_trips_it() {
+        let c = clock();
+        let beat = Arc::new(AtomicU64::new(c()));
+        let (tx, rx) = channel();
+        // A wide margin over the 20 ms beat: a loaded test machine oversleeps, and that is not a stall.
+        spawn_watchdog(beat.clone(), c.clone(), Duration::from_millis(500), move || tx.send(()).unwrap());
+        let end = Instant::now() + Duration::from_millis(1500);
+        while Instant::now() < end {
+            beat.store(c(), Ordering::SeqCst);
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(rx.try_recv().is_err(), "tripped while the loop was turning");
+    }
+
+    #[test]
+    fn a_disarmed_watchdog_never_trips() {
+        let c = clock();
+        let beat = Arc::new(AtomicU64::new(u64::MAX));
+        let (tx, rx) = channel();
+        spawn_watchdog(beat, c, Duration::from_millis(60), move || tx.send(()).unwrap());
+        assert!(rx.recv_timeout(Duration::from_millis(400)).is_err());
     }
 }

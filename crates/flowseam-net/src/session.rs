@@ -20,7 +20,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use flowseam_core::framing::{encode_frame, FrameDecoder};
-use flowseam_core::proto::{self, Msg, Rect, PROTO_VERSION};
+use flowseam_core::proto::{self, Kind, Msg, PathAddr, Rect, MIN_PROTO_VERSION, PROTO_VERSION};
 use rustls::{ClientConnection, ServerConnection, StreamOwned};
 
 use crate::NetError;
@@ -63,6 +63,23 @@ pub struct PeerInfo {
     pub node: [u8; 16],
     pub name: String,
     pub displays: Vec<Rect>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerPaths {
+    pub kind: Kind,
+    pub addrs: Vec<PathAddr>,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GreetOpts {
+    pub speak: u16,
+    pub paths: PeerPaths,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Greeting {
+    pub peer: PeerInfo,
+    pub ver: u16,
+    pub paths: Option<PeerPaths>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,42 +153,117 @@ impl<S: Read + Write> Channel<S> {
     /// [`Channel::hello`], with the peer's `node` tied to its certificate. `cert_node` is the first 16
     /// bytes of the fingerprint the TLS handshake verified; a Hello claiming any other node is refused
     /// before it is accepted, because callers key peers on `node` and the Hello itself is just a claim.
-    pub fn hello_bound(&mut self, me: &PeerInfo, timeout: Duration, cert_node: Option<[u8; 16]>) -> Result<PeerInfo, NetError> {
+    pub fn hello_bound(
+        &mut self,
+        me: &PeerInfo,
+        timeout: Duration,
+        cert_node: Option<[u8; 16]>,
+    ) -> Result<PeerInfo, NetError> {
+        self.greet(
+            me,
+            &GreetOpts {
+                speak: PROTO_VERSION,
+                paths: PeerPaths {
+                    kind: Kind::Other,
+                    addrs: vec![],
+                },
+            },
+            timeout,
+            cert_node,
+        )
+        .map(|g| g.peer)
+    }
+
+    pub fn greet(
+        &mut self,
+        me: &PeerInfo,
+        opts: &GreetOpts,
+        timeout: Duration,
+        cert_node: Option<[u8; 16]>,
+    ) -> Result<Greeting, NetError> {
         let deadline = Instant::now() + timeout;
         self.send(&Msg::Hello {
-            ver: PROTO_VERSION,
+            ver: opts.speak,
             node: me.node,
             name: me.name.clone(),
             displays: me.displays.clone(),
         })?;
-        let peer = match self.next_msg(deadline)? {
-            Msg::Hello { ver, node, name, displays } => {
-                if ver != PROTO_VERSION {
-                    let reason = format!("protocol {ver} unsupported, need {PROTO_VERSION}");
+        let (peer_ver, peer) = match self.next_msg(deadline)? {
+            Msg::Hello {
+                ver,
+                node,
+                name,
+                displays,
+            } => {
+                if ver < MIN_PROTO_VERSION {
+                    let reason =
+                        format!("protocol {ver} unsupported, need at least {MIN_PROTO_VERSION}");
                     let _ = self.send(&Msg::HelloAck {
-                        ver: PROTO_VERSION,
+                        ver: opts.speak,
                         accepted: false,
                         reason: Some(reason),
                     });
-                    return Err(NetError::VersionMismatch { ours: PROTO_VERSION, theirs: ver });
+                    return Err(NetError::VersionMismatch {
+                        ours: opts.speak,
+                        theirs: ver,
+                    });
                 }
                 if cert_node.is_some_and(|n| n != node) {
                     let reason = "Hello node does not match the certificate".to_string();
-                    let _ = self.send(&Msg::HelloAck { ver: PROTO_VERSION, accepted: false, reason: Some(reason.clone()) });
+                    let _ = self.send(&Msg::HelloAck {
+                        ver: opts.speak,
+                        accepted: false,
+                        reason: Some(reason.clone()),
+                    });
                     return Err(NetError::Proto(reason));
                 }
-                PeerInfo { node, name, displays }
+                (
+                    ver,
+                    PeerInfo {
+                        node,
+                        name,
+                        displays,
+                    },
+                )
             }
             other => return Err(NetError::Proto(format!("expected Hello, got {other:?}"))),
         };
-        self.send(&Msg::HelloAck { ver: PROTO_VERSION, accepted: true, reason: None })?;
+        self.send(&Msg::HelloAck {
+            ver: opts.speak,
+            accepted: true,
+            reason: None,
+        })?;
         match self.next_msg(deadline)? {
-            Msg::HelloAck { accepted: true, .. } => Ok(peer),
-            Msg::HelloAck { accepted: false, reason, .. } => {
-                Err(NetError::Rejected(reason.unwrap_or_default()))
+            Msg::HelloAck { accepted: true, .. } => {}
+            Msg::HelloAck {
+                accepted: false, ..
+            } if peer_ver < opts.speak => {
+                return Err(NetError::VersionMismatch {
+                    ours: opts.speak,
+                    theirs: peer_ver,
+                });
             }
-            other => Err(NetError::Proto(format!("expected HelloAck, got {other:?}"))),
+            Msg::HelloAck {
+                accepted: false,
+                reason,
+                ..
+            } => return Err(NetError::Rejected(reason.unwrap_or_default())),
+            other => return Err(NetError::Proto(format!("expected HelloAck, got {other:?}"))),
         }
+        let ver = opts.speak.min(peer_ver);
+        let paths = if ver >= 4 {
+            self.send(&Msg::Paths {
+                kind: opts.paths.kind,
+                addrs: opts.paths.addrs.clone(),
+            })?;
+            match self.next_msg(deadline)? {
+                Msg::Paths { kind, addrs } => Some(PeerPaths { kind, addrs }),
+                other => return Err(NetError::Proto(format!("expected Paths, got {other:?}"))),
+            }
+        } else {
+            None
+        };
+        Ok(Greeting { peer, ver, paths })
     }
 
     pub(crate) fn next_msg(&mut self, deadline: Instant) -> Result<Msg, NetError> {
@@ -574,17 +666,196 @@ mod tests {
         assert_eq!(t.join().unwrap().unwrap(), ia);
     }
 
+    fn opts(speak: u16, kind: Kind, port: u16) -> GreetOpts {
+        GreetOpts {
+            speak,
+            paths: PeerPaths {
+                kind,
+                addrs: vec![PathAddr {
+                    addr: format!("127.0.0.1:{port}").parse().unwrap(),
+                    kind,
+                }],
+            },
+        }
+    }
+
     #[test]
-    fn hello_rejects_a_peer_on_another_protocol_version() {
+    fn v4_exchanges_paths() {
+        let (a, b) = pair();
+        let (ia, ib) = (info("mac", 1), info("win", 2));
+        let (oa, ob) = (opts(4, Kind::Wired, 1), opts(4, Kind::WiFi, 2));
+        let expected_a = oa.paths.clone();
+        let expected_b = ob.paths.clone();
+        let t =
+            thread::spawn(move || Channel::new(b).greet(&ib, &ob, Duration::from_secs(2), None));
+        let ga = Channel::new(a)
+            .greet(&ia, &oa, Duration::from_secs(2), None)
+            .unwrap();
+        let gb = t.join().unwrap().unwrap();
+        assert_eq!((ga.ver, ga.paths), (4, Some(expected_b)));
+        assert_eq!((gb.ver, gb.paths), (4, Some(expected_a)));
+    }
+
+    #[test]
+    fn speaking_three_skips_paths() {
         let (a, b) = pair();
         let t = thread::spawn(move || {
-            let mut raw = Channel::new(b);
-            raw.send(&Msg::Hello { ver: 99, node: [0; 16], name: "old".into(), displays: vec![] })
-                .unwrap();
-            let _ = raw.next_msg(Instant::now() + Duration::from_secs(2));
+            Channel::new(b).greet(
+                &info("win", 2),
+                &opts(4, Kind::WiFi, 2),
+                Duration::from_secs(2),
+                None,
+            )
         });
-        let err = Channel::new(a).hello(&info("mac", 1), Duration::from_secs(2)).unwrap_err();
-        assert!(matches!(err, NetError::VersionMismatch { ours: PROTO_VERSION, theirs: 99 }), "{err}");
+        let ga = Channel::new(a)
+            .greet(
+                &info("mac", 1),
+                &opts(3, Kind::Wired, 1),
+                Duration::from_secs(2),
+                None,
+            )
+            .unwrap();
+        let gb = t.join().unwrap().unwrap();
+        assert_eq!((ga.ver, ga.paths), (3, None));
+        assert_eq!((gb.ver, gb.paths), (3, None));
+    }
+
+    #[test]
+    fn old_peer_refused() {
+        let (a, b) = pair();
+        let t = thread::spawn(move || {
+            let mut ch = Channel::new(b);
+            ch.send(&Msg::Hello {
+                ver: 2,
+                node: [2; 16],
+                name: "old".into(),
+                displays: vec![],
+            })
+            .unwrap();
+            assert!(matches!(
+                ch.next_msg(Instant::now() + Duration::from_secs(2))
+                    .unwrap(),
+                Msg::Hello { .. }
+            ));
+            assert!(matches!(
+                ch.next_msg(Instant::now() + Duration::from_secs(2))
+                    .unwrap(),
+                Msg::HelloAck {
+                    accepted: false,
+                    ..
+                }
+            ));
+        });
+        assert!(matches!(
+            Channel::new(a).greet(
+                &info("mac", 1),
+                &opts(4, Kind::Other, 1),
+                Duration::from_secs(2),
+                None
+            ),
+            Err(NetError::VersionMismatch { ours: 4, theirs: 2 })
+        ));
+        t.join().unwrap();
+    }
+
+    #[test]
+    fn expected_paths_is_protocol_error() {
+        let (a, b) = pair();
+        let t = thread::spawn(move || {
+            let mut ch = Channel::new(b);
+            ch.send(&Msg::Hello {
+                ver: 4,
+                node: [2; 16],
+                name: "peer".into(),
+                displays: vec![],
+            })
+            .unwrap();
+            assert!(matches!(
+                ch.next_msg(Instant::now() + Duration::from_secs(2))
+                    .unwrap(),
+                Msg::Hello { .. }
+            ));
+            ch.send(&Msg::HelloAck {
+                ver: 4,
+                accepted: true,
+                reason: None,
+            })
+            .unwrap();
+            assert!(matches!(
+                ch.next_msg(Instant::now() + Duration::from_secs(2))
+                    .unwrap(),
+                Msg::HelloAck { .. }
+            ));
+            assert!(matches!(
+                ch.next_msg(Instant::now() + Duration::from_secs(2))
+                    .unwrap(),
+                Msg::Paths { .. }
+            ));
+            ch.send(&Msg::Ping { t: 1 }).unwrap();
+        });
+        assert!(matches!(
+            Channel::new(a).greet(
+                &info("mac", 1),
+                &opts(4, Kind::Other, 1),
+                Duration::from_secs(2),
+                None
+            ),
+            Err(NetError::Proto(_))
+        ));
+        t.join().unwrap();
+    }
+
+    #[test]
+    fn v3_refusal_then_retry() {
+        let (a, b) = pair();
+        let t = thread::spawn(move || {
+            let mut ch = Channel::new(b);
+            for turn in 0..2 {
+                ch.send(&Msg::Hello {
+                    ver: 3,
+                    node: [2; 16],
+                    name: "v3".into(),
+                    displays: vec![],
+                })
+                .unwrap();
+                let hello = ch
+                    .next_msg(Instant::now() + Duration::from_secs(2))
+                    .unwrap();
+                assert!(
+                    matches!(hello, Msg::Hello { ver, .. } if ver == if turn == 0 { 4 } else { 3 })
+                );
+                assert!(matches!(
+                    ch.next_msg(Instant::now() + Duration::from_secs(2))
+                        .unwrap(),
+                    Msg::HelloAck { accepted: true, .. }
+                ));
+                ch.send(&Msg::HelloAck {
+                    ver: 3,
+                    accepted: turn == 1,
+                    reason: Some("version".into()),
+                })
+                .unwrap();
+            }
+        });
+        let mut ch = Channel::new(a);
+        assert!(matches!(
+            ch.greet(
+                &info("mac", 1),
+                &opts(4, Kind::Other, 1),
+                Duration::from_secs(2),
+                None
+            ),
+            Err(NetError::VersionMismatch { ours: 4, theirs: 3 })
+        ));
+        let g = ch
+            .greet(
+                &info("mac", 1),
+                &opts(3, Kind::Other, 1),
+                Duration::from_secs(2),
+                None,
+            )
+            .unwrap();
+        assert_eq!((g.ver, g.paths), (3, None));
         t.join().unwrap();
     }
 

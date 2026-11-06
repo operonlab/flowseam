@@ -297,6 +297,21 @@ pub fn clamp_inside(displays: &[Rect], p: Point) -> Option<Point> {
     Some(clamp_to_nearest(displays, p.x as i64, p.y as i64))
 }
 
+/// `p` itself when a display holds it, else the nearest point on a display (edges included, no inset):
+/// pushing past the edge leaves the cursor on the edge, where the return strip is. `p` when there are no displays.
+pub fn clamp_to_displays(displays: &[Rect], p: Point) -> Point {
+    let mut best: Option<(i64, Point)> = None;
+    for r in displays {
+        let x = (p.x as i64).clamp(r.x as i64, r.x as i64 + r.w as i64 - 1);
+        let y = (p.y as i64).clamp(r.y as i64, r.y as i64 + r.h as i64 - 1);
+        let d = (x - p.x as i64).pow(2) + (y - p.y as i64).pow(2);
+        if best.is_none_or(|(bd, _)| d < bd) {
+            best = Some((d, Point { x: x as i32, y: y as i32 }));
+        }
+    }
+    best.map_or(p, |(_, q)| q)
+}
+
 /// Clamp into the nearest display's inset rectangle (display itself if the
 /// inset would be empty). Nearest by squared distance; ties go to input order.
 fn clamp_to_nearest(displays: &[Rect], x: i64, y: i64) -> Point {
@@ -527,5 +542,13 @@ mod tests {
         assert!(in_exit_strip(&d, p(799, 300), Edge::Right, 2));
         assert!(in_exit_strip(&d, p(1199, 900), Edge::Right, 2));
         assert!(!in_exit_strip(&d, p(0, 600), Edge::Top, 2), "seam between stacked displays");
+    }
+
+    #[test]
+    fn clamp_picks_the_nearest_display_on_a_two_monitor_desktop() {
+        let two = vec![r(0, 0, 1920, 1080), r(1920, 0, 1280, 720)];
+        // Below the shorter right monitor: snaps up onto it, not across to the left one.
+        assert_eq!(clamp_to_displays(&two, p(2500, 900)), p(2500, 719));
+        assert_eq!(clamp_to_displays(&two, p(10, 10)), p(10, 10));
     }
 }

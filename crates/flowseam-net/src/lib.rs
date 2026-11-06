@@ -6,11 +6,13 @@ use std::fmt;
 use std::io;
 
 pub mod backoff;
+pub mod beacon;
 pub mod clipboard;
 pub mod files;
 pub mod identity;
 pub mod link;
 pub mod pair;
+pub mod paths;
 pub mod pins;
 pub mod session;
 pub mod tls;

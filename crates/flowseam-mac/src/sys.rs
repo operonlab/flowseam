@@ -466,49 +466,43 @@ pub fn drag_change_count() -> Result<u64, String> {
     }
 }
 
-/// File paths on the drag pasteboard. Each item's `public.file-url` goes through `filePathURL`, which
-/// also resolves the file-reference form (`file:///.file/id=…`) to a path.
+/// File paths on the drag pasteboard, through `readObjectsForClasses:options:`, which hands back its own array.
+/// Walking `pasteboardItems` by index raised "index 1 beyond bounds for empty array" when a drag rewrote the
+/// pasteboard mid-loop, and the exception aborted the worker (crash report 2026-11-05 20:17, a link thread).
+/// `filePathURL` also resolves the file-reference form (`file:///.file/id=…`) to a path.
 pub fn drag_files() -> Result<Vec<std::path::PathBuf>, String> {
-    type SendObj = extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void;
-    type SendObj1 = extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> *mut c_void;
-    type SendIdx = extern "C" fn(*mut c_void, *mut c_void, usize) -> *mut c_void;
-    type SendCount = extern "C" fn(*mut c_void, *mut c_void) -> usize;
-    type SendCStr = extern "C" fn(*mut c_void, *mut c_void) -> *const std::ffi::c_char;
-    let _pool = Pool::new();
-    unsafe {
-        let pb = drag_pasteboard()?;
-        let obj: SendObj = std::mem::transmute::<*const (), SendObj>(objc_msgSend as *const ());
-        let obj1: SendObj1 = std::mem::transmute::<*const (), SendObj1>(objc_msgSend as *const ());
-        let idx: SendIdx = std::mem::transmute::<*const (), SendIdx>(objc_msgSend as *const ());
-        let count: SendCount = std::mem::transmute::<*const (), SendCount>(objc_msgSend as *const ());
-        let cstr: SendCStr = std::mem::transmute::<*const (), SendCStr>(objc_msgSend as *const ());
-        let items = obj(pb, sel_registerName(c"pasteboardItems".as_ptr()));
-        if items.is_null() {
+    // SAFETY: a static NSString exported by AppKit.
+    let name = unsafe { objc2_app_kit::NSPasteboardNameDrag };
+    files_on(&objc2_app_kit::NSPasteboard::pasteboardWithName(name))
+}
+
+/// What `files_on` answers for a file reference URL whose file is gone (dragged, then deleted).
+const UNRESOLVED: &str = "a dragged file URL does not resolve to a path";
+
+/// The file paths on `pb`; other URLs and data are left out.
+fn files_on(pb: &objc2_app_kit::NSPasteboard) -> Result<Vec<std::path::PathBuf>, String> {
+    use objc2::runtime::AnyObject;
+    use objc2::ClassType;
+    use objc2_app_kit::NSPasteboardURLReadingFileURLsOnlyKey;
+    use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSURL};
+    objc2::rc::autoreleasepool(|_| {
+        // SAFETY: a static NSString exported by AppKit.
+        let key = unsafe { NSPasteboardURLReadingFileURLsOnlyKey };
+        let classes = NSArray::from_slice(&[NSURL::class()]);
+        let yes = NSNumber::new_bool(true);
+        let options = NSDictionary::from_slices(&[key], &[&*yes as &AnyObject]);
+        // SAFETY: NSURL is a pasteboard-readable class; the option takes an NSNumber.
+        let Some(objects) = (unsafe { pb.readObjectsForClasses_options(&classes, Some(&options)) }) else {
             return Ok(Vec::new());
-        }
-        let ty = ns_string(c"public.file-url")?;
-        let url_cls = objc_getClass(c"NSURL".as_ptr());
+        };
         let mut out = Vec::new();
-        for i in 0..count(items, sel_registerName(c"count".as_ptr())) {
-            let item = idx(items, sel_registerName(c"objectAtIndex:".as_ptr()), i);
-            let s = obj1(item, sel_registerName(c"stringForType:".as_ptr()), ty);
-            if s.is_null() {
-                continue; // not a file: text or an image dragged along
-            }
-            let url = obj1(url_cls, sel_registerName(c"URLWithString:".as_ptr()), s);
-            let file = if url.is_null() { url } else { obj(url, sel_registerName(c"filePathURL".as_ptr())) };
-            let path = if file.is_null() { file } else { obj(file, sel_registerName(c"path".as_ptr())) };
-            if path.is_null() {
-                return Err(format!("drag item {i} has a file URL that does not resolve to a path"));
-            }
-            let p = cstr(path, sel_registerName(c"UTF8String".as_ptr()));
-            if p.is_null() {
-                return Err("UTF8String returned NULL".into());
-            }
-            out.push(std::path::PathBuf::from(std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned()));
+        for object in objects.iter() {
+            let Some(url) = object.downcast_ref::<NSURL>() else { continue };
+            let path = url.filePathURL().and_then(|u| u.path()).ok_or(UNRESOLVED)?;
+            out.push(std::path::PathBuf::from(path.to_string()));
         }
         Ok(out)
-    }
+    })
 }
 
 /// Bytes an unprivileged process may still write on the volume holding `p`.
@@ -545,14 +539,73 @@ pub fn frontmost_pid() -> Option<i32> {
     }
 }
 
-/// End a drag in progress in the active app without dropping it: Escape, posted straight to that app's
-/// event queue. Routed through the HID stream instead, Escape goes to whichever app is active when it is
-/// delivered, and the grab makes our own cursor-hiding window active right after this call: measured, a
-/// Finder drag then stays alive, while Escape to Finder's pid ends it. Returns the pid it went to, or
-/// `None` when no active app was found and it went through the HID stream.
-pub fn cancel_drag_in_front() -> Result<Option<i32>, String> {
+/// Post a media key (an NX key type: volume, mute, play, next, previous) as the system-defined event macOS acts
+/// on, marked as ours. Down and up are separate events, like a real keyboard's.
+pub fn post_media_key(nx: i64, down: bool) -> Result<(), BackendError> {
+    use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType};
+    let state: i64 = if down { 0x0A } else { 0x0B };
+    objc2::rc::autoreleasepool(|_| {
+        let ev = NSEvent::otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2(
+            NSEventType::SystemDefined,
+            objc2_foundation::NSPoint::new(0.0, 0.0),
+            NSEventModifierFlags((state as usize) << 8),
+            0.0,
+            0,
+            None,
+            8, // NX_SUBTYPE_AUX_CONTROL_BUTTONS
+            ((nx << 16) | (state << 8)) as isize,
+            -1,
+        )
+        .ok_or(BackendError::Os { code: -1, api: "NSEvent otherEventWithType" })?;
+        // SAFETY: `CGEvent` returns the event's own CGEventRef, valid while `ev` lives; it is not ours to release.
+        // A plain send: objc2's checked msg_send wants the opaque `__CGEvent` struct type spelled out.
+        let cg: *mut c_void = unsafe {
+            type SendObj = extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void;
+            let send: SendObj = std::mem::transmute::<*const (), SendObj>(objc_msgSend as *const ());
+            send(objc2::rc::Retained::as_ptr(&ev) as *mut c_void, sel_registerName(c"CGEvent".as_ptr()))
+        };
+        if cg.is_null() {
+            return Err(BackendError::Os { code: -1, api: "NSEvent CGEvent" });
+        }
+        mark(cg as ffi::CGEventRef);
+        // SAFETY: a valid event, posted while `ev` keeps it alive.
+        unsafe { ffi::CGEventPost(ffi::TAP_LOCATION_HID, cg as ffi::CGEventRef) };
+        Ok(())
+    })
+}
+
+/// Post a key press and release straight to one process, marked as ours.
+pub fn post_key_to_pid(keycode: u16, pid: i32) -> Result<(), String> {
+    for down in [true, false] {
+        // SAFETY: a null source is allowed; the event is released below.
+        let ev = unsafe { ffi::CGEventCreateKeyboardEvent(std::ptr::null(), keycode, down) };
+        if ev.is_null() {
+            return Err("CGEventCreateKeyboardEvent returned NULL".into());
+        }
+        mark(ev);
+        // SAFETY: `ev` is a valid event we own.
+        unsafe {
+            ffi::CGEventPostToPid(pid, ev);
+            ffi::CFRelease(ev as *const c_void);
+        }
+    }
+    Ok(())
+}
+
+/// End a drag in progress here without dropping it: Escape, posted straight to the event queue of the app
+/// that owns the drag. Routed through the HID stream instead, Escape goes to whichever app is active when it
+/// is delivered, and the grab makes our own cursor-hiding window active right after this call: measured, a
+/// Finder drag then stays alive, while Escape to Finder's pid ends it. The owner is the app whose window was
+/// under the press, not the active app: Finder drags an icon out of a background window without becoming
+/// active, and the active app then gets the Escape instead (a text view treats it as "complete"). Falls back
+/// to the active app, then to the HID stream. Returns the pid it went to and which of the two it was, or
+/// `None` when it went through the HID stream.
+pub fn cancel_drag(pressed_at: Option<Point>) -> Result<Option<(i32, &'static str)>, String> {
     const ESCAPE: u16 = 53;
-    let pid = frontmost_pid();
+    let target = pressed_at
+        .and_then(window_owner_at)
+        .map(|pid| (pid, "the window it was pressed in"))
+        .or_else(|| frontmost_pid().map(|pid| (pid, "the active app")));
     for down in [true, false] {
         // SAFETY: a null source is allowed; the event is released below.
         let ev = unsafe { ffi::CGEventCreateKeyboardEvent(std::ptr::null(), ESCAPE, down) };
@@ -562,14 +615,44 @@ pub fn cancel_drag_in_front() -> Result<Option<i32>, String> {
         mark(ev);
         // SAFETY: `ev` is a valid event we own.
         unsafe {
-            match pid {
-                Some(p) => ffi::CGEventPostToPid(p, ev),
+            match target {
+                Some((pid, _)) => ffi::CGEventPostToPid(pid, ev),
                 None => ffi::CGEventPost(ffi::TAP_LOCATION_HID, ev),
             }
             ffi::CFRelease(ev as *const c_void);
         }
     }
-    Ok(pid)
+    Ok(target)
+}
+
+/// Owner of the frontmost window a mouse-down at this CoreGraphics point would hit.
+pub fn window_owner_at(p: Point) -> Option<i32> {
+    type WindowAt = unsafe extern "C" fn(*mut c_void, *mut c_void, CGPoint, isize) -> isize;
+    // SAFETY: both CoreGraphics display queries take no owned pointers.
+    let bounds = unsafe { ffi::CGDisplayBounds(ffi::CGMainDisplayID()) };
+    let cocoa = CGPoint { x: p.x as f64, y: bounds.size.height - p.y as f64 };
+    let _pool = Pool::new();
+    // SAFETY: the class method accepts an NSPoint (same layout as CGPoint) and NSInteger;
+    // the window list is owned here and released after reading its borrowed values.
+    unsafe {
+        let class = ffi::objc_getClass(c"NSWindow".as_ptr());
+        if class.is_null() { return None; }
+        let send: WindowAt = std::mem::transmute::<*const (), WindowAt>(ffi::objc_msgSend as *const ());
+        let wid = send(class, ffi::sel_registerName(c"windowNumberAtPoint:belowWindowWithWindowNumber:".as_ptr()), cocoa, 0);
+        if wid <= 0 { return None; }
+        let list = ffi::CGWindowListCopyWindowInfo(1 << 3, wid as u32);
+        if list.is_null() { return None; }
+        let result = if ffi::CFArrayGetCount(list) > 0 {
+            let dict = ffi::CFArrayGetValueAtIndex(list, 0);
+            if dict.is_null() { None } else {
+                let number = ffi::CFDictionaryGetValue(dict, ffi::kCGWindowOwnerPID);
+                let mut pid = 0i32;
+                if !number.is_null() && ffi::CFNumberGetValue(number, 3, (&mut pid as *mut i32).cast()) && pid > 0 { Some(pid) } else { None }
+            }
+        } else { None };
+        ffi::CFRelease(list);
+        result
+    }
 }
 
 /// This Mac's drags for `flowseam_net::files::DragHub`.
@@ -625,6 +708,20 @@ mod pasteboard_tests {
         assert!(pid > 0 && unsafe { libc::kill(pid, 0) } == 0, "pid {pid} is not alive");
     }
 
+    #[test]
+    fn window_owner_at_cursor_is_live_from_a_background_thread() {
+        let pid = std::thread::spawn(|| cursor_position().ok().and_then(window_owner_at)).join().unwrap();
+        if let Some(pid) = pid {
+            // SAFETY: signal zero only probes whether the process exists.
+            assert!(unsafe { libc::kill(pid, 0) } == 0, "pid {pid} is not alive");
+        }
+    }
+
+    #[test]
+    fn window_owner_at_far_outside_displays_is_none() {
+        assert_eq!(window_owner_at(Point { x: -100000, y: -100000 }), None);
+    }
+
     /// Known answer: the volume of the temp dir has some space, and a missing path is an error, not 0.
     #[test]
     fn free_bytes_measures_a_real_volume() {
@@ -633,12 +730,79 @@ mod pasteboard_tests {
         assert!(free_bytes(std::path::Path::new("/no/such/flowseam/path")).is_err());
     }
 
-    /// Reads only; the drag pasteboard holds whatever was dragged last on this Mac (maybe nothing).
+    /// Known answer on a private pasteboard: the file URLs come back as their paths, in order; a web URL is not a
+    /// file and is left out.
+    #[test]
+    fn files_on_a_pasteboard_are_its_file_urls_as_paths() {
+        use objc2::runtime::ProtocolObject;
+        use objc2_app_kit::{NSPasteboard, NSPasteboardWriting};
+        use objc2_foundation::{NSArray, NSString, NSURL};
+        let pb = NSPasteboard::pasteboardWithUniqueName();
+        pb.clearContents();
+        let a = NSURL::fileURLWithPath(&NSString::from_str("/tmp/flowseam a.txt"));
+        let web = NSURL::URLWithString(&NSString::from_str("https://example.com/b")).unwrap();
+        let c = NSURL::fileURLWithPath(&NSString::from_str("/tmp/中文 c.pdf"));
+        let objects: Vec<&ProtocolObject<dyn NSPasteboardWriting>> = [&a, &web, &c].iter().map(|u| ProtocolObject::from_ref(&***u)).collect();
+        assert!(pb.writeObjects(&NSArray::from_slice(&objects)));
+        let got = files_on(&pb).expect("read");
+        assert_eq!(got, vec![std::path::PathBuf::from("/tmp/flowseam a.txt"), std::path::PathBuf::from("/tmp/中文 c.pdf")]);
+    }
+
+    /// Known answer: Finder puts file reference URLs (file:///.file/id=…) on the drag pasteboard, and one whose file
+    /// has since been deleted no longer resolves. That is an error, not an empty list: the file cannot be sent.
+    #[test]
+    fn a_dangling_file_reference_is_an_error() {
+        use objc2::runtime::ProtocolObject;
+        use objc2_app_kit::{NSPasteboard, NSPasteboardWriting};
+        use objc2_foundation::{NSArray, NSString, NSURL};
+        let path = std::env::temp_dir().join(format!("flowseam-dangling-{}.txt", std::process::id()));
+        std::fs::write(&path, b"x").unwrap();
+        let reference = NSURL::fileURLWithPath(&NSString::from_str(path.to_str().unwrap())).fileReferenceURL().expect("a reference to a file that exists");
+        let pb = NSPasteboard::pasteboardWithUniqueName();
+        pb.clearContents();
+        let objects: Vec<&ProtocolObject<dyn NSPasteboardWriting>> = vec![ProtocolObject::from_ref(&*reference)];
+        assert!(pb.writeObjects(&NSArray::from_slice(&objects)));
+        assert_eq!(files_on(&pb).expect("resolves while the file exists"), vec![path.canonicalize().unwrap()]);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(files_on(&pb), Err(UNRESOLVED.to_string()));
+    }
+
+    /// Known answer on the real machine: a posted volume-up raises the output volume, a volume-down restores it.
+    /// Changes the volume for a moment, so it runs only when asked for.
+    #[test]
+    #[ignore = "changes this Mac's output volume briefly"]
+    fn a_posted_volume_key_changes_the_volume() {
+        let volume = || {
+            let out = std::process::Command::new("osascript").args(["-e", "output volume of (get volume settings)"]).output().unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().parse::<i32>().expect("a volume")
+        };
+        let before = volume();
+        let (up, down) = if before >= 94 { (1, 0) } else { (0, 1) }; // room to move in the direction tried first
+        for (nx, d) in [(up, true), (up, false)] {
+            post_media_key(nx, d).unwrap();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        let moved = volume();
+        for (nx, d) in [(down, true), (down, false)] {
+            post_media_key(nx, d).unwrap();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        assert_ne!(moved, before, "the volume did not move ({before})");
+        assert!((volume() - before).abs() <= 7, "restored near {before}");
+    }
+
+    /// Reads only; the drag pasteboard holds whatever was dragged last on this Mac: maybe nothing, maybe a file
+    /// deleted since (`a_dangling_file_reference_is_an_error` pins what that reads as).
     #[test]
     fn drag_pasteboard_is_readable() {
         drag_change_count().expect("drag changeCount");
-        for p in drag_files().expect("drag files") {
-            assert!(p.is_absolute(), "{p:?}");
+        match drag_files() {
+            Ok(paths) => {
+                for p in paths {
+                    assert!(p.is_absolute(), "{p:?}");
+                }
+            }
+            Err(e) => assert_eq!(e, UNRESOLVED, "drag files"),
         }
     }
 

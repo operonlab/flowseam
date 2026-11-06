@@ -8,10 +8,10 @@ pub const EDGES: [Edge; 4] = [Edge::Left, Edge::Right, Edge::Top, Edge::Bottom];
 /// GUI label for the side a peer sits on.
 pub fn edge_label(e: Edge) -> &'static str {
     match e {
-        Edge::Left => "左",
-        Edge::Right => "右",
-        Edge::Top => "上",
-        Edge::Bottom => "下",
+        Edge::Left => crate::i18n::tr("左"),
+        Edge::Right => crate::i18n::tr("右"),
+        Edge::Top => crate::i18n::tr("上"),
+        Edge::Bottom => crate::i18n::tr("下"),
     }
 }
 
@@ -45,9 +45,9 @@ pub const KEY_MAPS: [KeyMap; 3] = [KeyMap::Position, KeyMap::Mac, KeyMap::None];
 /// GUI label for a key mapping mode.
 pub fn keys_label(k: KeyMap) -> &'static str {
     match k {
-        KeyMap::Position => "依鍵盤位置（⌥=Win、⌘=Alt）",
-        KeyMap::Mac => "依 Mac 快捷鍵（⌘C 複製、⌘Tab 切換、單按 ⌥ 開始）",
-        KeyMap::None => "不轉換（對方也是 Mac）",
+        KeyMap::Position => crate::i18n::tr("依鍵盤位置（⌥=Win、⌘=Alt）"),
+        KeyMap::Mac => crate::i18n::tr("依 Mac 快捷鍵（⌘C 複製、⌘Tab 切換、單按 ⌥ 開始）"),
+        KeyMap::None => crate::i18n::tr("不轉換（對方也是 Mac）"),
     }
 }
 
@@ -59,6 +59,53 @@ pub struct UiState {
     pub boundary_px: i32,
     pub chord: String,
     pub peers: Vec<PeerRow>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    Controller,
+    Driven,
+}
+
+impl Role {
+    pub fn shows_key_mapping(self) -> bool {
+        matches!(self, Self::Controller)
+    }
+    pub fn shows_chord(self) -> bool {
+        matches!(self, Self::Controller)
+    }
+    pub fn enters_pair_code(self) -> bool {
+        matches!(self, Self::Controller)
+    }
+}
+
+pub fn role() -> Role {
+    if cfg!(windows) {
+        Role::Driven
+    } else {
+        Role::Controller
+    }
+}
+
+const SHARING_MARK: &str = "sharing-on";
+
+/// Whether sharing was on when it was last switched. A machine that restarts, or an app that was updated,
+/// comes back sharing: a driven machine has nobody at its own keyboard to switch it back on.
+pub fn sharing_remembered(dir: &std::path::Path) -> bool {
+    dir.join(SHARING_MARK).is_file()
+}
+
+pub fn remember_sharing(dir: &std::path::Path, on: bool) -> std::io::Result<()> {
+    let mark = dir.join(SHARING_MARK);
+    if on {
+        std::fs::create_dir_all(dir)?;
+        std::fs::write(mark, b"on\n")
+    } else {
+        match std::fs::remove_file(mark) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            r => r,
+        }
+    }
 }
 
 impl UiState {
@@ -107,8 +154,10 @@ impl UiState {
             Err(ConfigError::Invalid(list)) => list,
             Err(other) => vec![other.to_string()],
         };
-        if let Err(e) = check_chord(&self.chord) {
-            out.push(e);
+        if role().shows_chord() {
+            if let Err(e) = check_chord(&self.chord) {
+                out.push(e);
+            }
         }
         out
     }
@@ -116,13 +165,17 @@ impl UiState {
     /// Record a pairing result on the row it was started for. Pairing runs in the background, so
     /// the row may have been removed or its address edited meanwhile: both are errors, never a
     /// write to whichever row now sits at `idx`.
-    pub fn apply_pairing(&mut self, idx: usize, addr: &str, fp: &flowseam_net::identity::Fingerprint) -> Result<(), String> {
-        let row = self.peers.get_mut(idx).ok_or_else(|| "配對期間這台裝置被移除了，請重新配對".to_string())?;
+    /// Whether the fingerprint changed: pairing again with a computer that is already paired gives the same one,
+    /// and then there is nothing new to save.
+    pub fn apply_pairing(&mut self, idx: usize, addr: &str, fp: &flowseam_net::identity::Fingerprint) -> Result<bool, String> {
+        let row = self.peers.get_mut(idx).ok_or_else(|| crate::i18n::tr("配對期間這台裝置被移除了，請重新配對").to_string())?;
         if row.addr.trim() != addr {
-            return Err(format!("配對期間位址從 {addr} 改成 {}，請重新配對", row.addr.trim()));
+            return Err(crate::i18n::trf("配對期間位址從 {} 改成 {}，請重新配對", &[&addr, &row.addr.trim()]));
         }
-        row.fingerprint = flowseam_net::identity::to_hex(fp);
-        Ok(())
+        let hex = flowseam_net::identity::to_hex(fp);
+        let changed = row.fingerprint != hex;
+        row.fingerprint = hex;
+        Ok(changed)
     }
 
     /// One label per row for the pairing picker, distinct even when names repeat or are empty.
@@ -131,7 +184,7 @@ impl UiState {
             .peers
             .iter()
             .map(|p| {
-                let name = if p.name.trim().is_empty() { "（未命名）" } else { p.name.trim() };
+                let name = if p.name.trim().is_empty() { crate::i18n::tr("（未命名）") } else { p.name.trim() };
                 if p.addr.trim().is_empty() { name.to_string() } else { format!("{name} · {}", p.addr.trim()) }
             })
             .collect();
@@ -154,21 +207,21 @@ const MODIFIERS: [&str; 5] = ["ctrl", "alt", "opt", "cmd", "shift"];
 pub fn check_chord(s: &str) -> Result<(), String> {
     let tokens: Vec<String> = s.split('+').map(|t| t.trim().to_ascii_lowercase()).collect();
     if tokens.iter().any(|t| t.is_empty()) {
-        return Err(format!("chord {s:?} 含空的片段"));
+        return Err(crate::i18n::trf("chord {} 含空的片段", &[&format!("{s:?}")]));
     }
     let (key, mods) = tokens.split_last().expect("split 至少回傳一段");
     if MODIFIERS.contains(&key.as_str()) {
-        return Err(format!("chord {s:?} 最後一段必須是按鍵，不是修飾鍵"));
+        return Err(crate::i18n::trf("chord {} 最後一段必須是按鍵，不是修飾鍵", &[&format!("{s:?}")]));
     }
     if mods.is_empty() {
-        return Err(format!("chord {s:?} 至少要一個修飾鍵（{}）", MODIFIERS.join("/")));
+        return Err(crate::i18n::trf("chord {} 至少要一個修飾鍵（{}）", &[&format!("{s:?}"), &MODIFIERS.join("/")]));
     }
     for (i, m) in mods.iter().enumerate() {
         if !MODIFIERS.contains(&m.as_str()) {
-            return Err(format!("chord {s:?} 的 {m:?} 不是修飾鍵（{}）", MODIFIERS.join("/")));
+            return Err(crate::i18n::trf("chord {} 的 {} 不是修飾鍵（{}）", &[&format!("{s:?}"), &format!("{m:?}"), &MODIFIERS.join("/")]));
         }
         if mods[..i].contains(m) {
-            return Err(format!("chord {s:?} 的 {m:?} 重複"));
+            return Err(crate::i18n::trf("chord {} 的 {} 重複", &[&format!("{s:?}"), &format!("{m:?}")]));
         }
     }
     Ok(())
@@ -226,7 +279,8 @@ mod tests {
         ui.chord = "ctrl+".into();
         ui.arm_dist = 0;
         let all = ui.problems().join("|");
-        assert!(all.contains("chord"), "{all}");
+        // The chord is checked only where it is shown: a driven machine (Windows) never switches.
+        assert_eq!(all.contains("chord"), role().shows_chord(), "{all}");
         assert!(all.contains("arm_dist"), "{all}");
     }
 
@@ -244,10 +298,19 @@ mod tests {
         let mut ui = UiState::from_config(&sample());
         ui.peers[1].fingerprint.clear();
         let before = ui.peers[0].fingerprint.clone();
-        ui.apply_pairing(1, "192.168.1.21:24800", &[0x0f; 32]).unwrap();
+        assert!(ui.apply_pairing(1, "192.168.1.21:24800", &[0x0f; 32]).unwrap(), "a new fingerprint is a change");
         assert_eq!(ui.peers[1].fingerprint, "0f".repeat(32));
         assert_eq!(ui.peers[0].fingerprint, before);
         assert!(ui.problems().is_empty());
+    }
+
+    /// Pairing again with a computer that kept its identity: the window must not ask for a Save that is greyed out.
+    #[test]
+    fn pairing_again_with_the_same_fingerprint_is_not_a_change() {
+        let mut ui = UiState::from_config(&sample());
+        ui.peers[1].fingerprint = "0f".repeat(32);
+        assert!(!ui.apply_pairing(1, "192.168.1.21:24800", &[0x0f; 32]).unwrap());
+        assert!(ui.apply_pairing(1, "192.168.1.21:24800", &[0x1e; 32]).unwrap());
     }
 
     #[test]
@@ -297,5 +360,37 @@ mod tests {
     fn chords_read_as_mac_shortcut_symbols() {
         assert_eq!(chord_symbols("ctrl+alt+cmd+s"), "⌃⌥⌘S");
         assert_eq!(chord_symbols("shift+cmd+f1"), "⇧⌘F1");
+    }
+}
+
+#[cfg(test)]
+mod sharing_tests {
+    use super::*;
+
+    #[test]
+    fn sharing_is_remembered_across_starts_until_switched_off() {
+        let dir = std::env::temp_dir().join(format!("flowseam-sharing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!sharing_remembered(&dir), "a fresh install starts with sharing off");
+        remember_sharing(&dir, true).unwrap();
+        assert!(sharing_remembered(&dir));
+        remember_sharing(&dir, false).unwrap();
+        assert!(!sharing_remembered(&dir));
+        remember_sharing(&dir, false).unwrap(); // switching off twice is fine
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod role_tests {
+    use super::*;
+    #[test]
+    fn driven_hides_controller_only_controls() {
+        assert!(!Role::Driven.shows_key_mapping());
+        assert!(!Role::Driven.shows_chord());
+        assert!(!Role::Driven.enters_pair_code());
+        assert!(Role::Controller.shows_key_mapping());
+        assert!(Role::Controller.shows_chord());
+        assert!(Role::Controller.enters_pair_code());
     }
 }

@@ -1,3 +1,4 @@
+#![cfg(target_os = "macos")]
 //! STUBS for pieces owned by other branches. Each one fails loudly rather than pretending.
 //! Swap points:
 //!   - `run_worker`   → `flowseam_mac::worker::run(&Config)` + `flowseam_mac::worker::real_cursor_os()` (feature/mac2)

@@ -12,14 +12,14 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use flowseam_core::proto::Msg;
+use flowseam_core::proto::{Kind, Msg, PROTO_VERSION};
 use rustls::pki_types::ServerName;
 use rustls::{ClientConnection, ConnectionCommon, ServerConnection, StreamOwned};
 
 use crate::backoff::Backoff;
 use crate::identity::Identity;
 use crate::pins::PinSet;
-use crate::session::{Channel, End, PeerInfo, Timing};
+use crate::session::{Channel, End, GreetOpts, PeerInfo, PeerPaths, Timing};
 use crate::{tls, NetError};
 
 /// Socket read timeout. Lets the session loop turn over often enough to
@@ -39,6 +39,18 @@ pub struct Endpoint<'a> {
     pub pins: &'a PinSet,
     pub me: &'a PeerInfo,
     pub timing: Timing,
+    pub speak_for: Option<&'a (dyn Fn([u8; 16]) -> u16 + Sync)>,
+    pub paths_for: Option<&'a (dyn Fn(SocketAddr) -> PeerPaths + Sync)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkUp {
+    pub peer: PeerInfo,
+    pub ver: u16,
+    pub paths: Option<PeerPaths>,
+    pub local: SocketAddr,
+    pub remote: SocketAddr,
+    pub dialed: bool,
 }
 
 #[derive(Debug)]
@@ -62,7 +74,7 @@ pub fn run_client_once_with(
     ep: &Endpoint<'_>,
     outgoing: &Receiver<Msg>,
     incoming: &Sender<Msg>,
-    on_up: &dyn Fn(&PeerInfo),
+    on_up: &dyn Fn(&LinkUp),
 ) -> Result<Outcome, NetError> {
     let mut sock = TcpStream::connect_timeout(&addr, ep.timing.handshake_timeout).map_err(NetError::Io)?;
     prepare(&sock)?;
@@ -71,8 +83,10 @@ pub fn run_client_once_with(
     let mut conn = ClientConnection::new(cfg, name).map_err(NetError::Tls)?;
     finish_handshake(&mut conn, &mut sock, ep.timing.handshake_timeout)?;
     let node = cert_node(&conn)?;
+    let local = sock.local_addr().map_err(NetError::Io)?;
+    let remote = sock.peer_addr().map_err(NetError::Io)?;
     let probe = sock.try_clone().map_err(NetError::Io)?;
-    run_channel(StreamOwned::new(conn, sock), probe, node, ep, outgoing, incoming, on_up)
+    run_channel(StreamOwned::new(conn, sock), Probe { socket: probe, local, remote, dialed: true }, node, ep, outgoing, incoming, on_up)
 }
 
 pub fn serve_once(
@@ -90,7 +104,7 @@ pub fn serve_once_with(
     ep: &Endpoint<'_>,
     outgoing: &Receiver<Msg>,
     incoming: &Sender<Msg>,
-    on_up: &dyn Fn(&PeerInfo),
+    on_up: &dyn Fn(&LinkUp),
 ) -> Result<Outcome, NetError> {
     let (mut sock, _) = listener.accept().map_err(NetError::Io)?;
     prepare(&sock)?;
@@ -98,8 +112,10 @@ pub fn serve_once_with(
     let mut conn = ServerConnection::new(cfg).map_err(NetError::Tls)?;
     finish_handshake(&mut conn, &mut sock, ep.timing.handshake_timeout)?;
     let node = cert_node(&conn)?;
+    let local = sock.local_addr().map_err(NetError::Io)?;
+    let remote = sock.peer_addr().map_err(NetError::Io)?;
     let probe = sock.try_clone().map_err(NetError::Io)?;
-    run_channel(StreamOwned::new(conn, sock), probe, node, ep, outgoing, incoming, on_up)
+    run_channel(StreamOwned::new(conn, sock), Probe { socket: probe, local, remote, dialed: false }, node, ep, outgoing, incoming, on_up)
 }
 
 /// First 16 bytes of the fingerprint of the certificate the handshake verified against the pins: the
@@ -143,25 +159,51 @@ pub fn run_client(
     }
 }
 
-/// `probe` is a clone of the socket under `stream`: the evented session waits on it for readability so
+/// The socket a session waits on for readability, and the endpoints it was opened between.
+struct Probe {
+    socket: TcpStream,
+    local: SocketAddr,
+    remote: SocketAddr,
+    dialed: bool,
+}
+
+/// `probe.socket` is a clone of the socket under `stream`: the evented session waits on it for readability so
 /// outgoing input never queues behind a blocked read. `cert_node` is from [`cert_node`]; the peer's
 /// Hello must claim it, so `PeerInfo.node` handed to `on_up` is authenticated, not self-asserted.
 fn run_channel<S>(
     stream: S,
-    probe: TcpStream,
+    probe: Probe,
     cert_node: [u8; 16],
     ep: &Endpoint<'_>,
     outgoing: &Receiver<Msg>,
     incoming: &Sender<Msg>,
-    on_up: &dyn Fn(&PeerInfo),
+    on_up: &dyn Fn(&LinkUp),
 ) -> Result<Outcome, NetError>
 where
     S: std::io::Read + std::io::Write + crate::session::Buffered + Send,
 {
     let mut ch = Channel::new(stream);
-    let peer = ch.hello_bound(ep.me, ep.timing.handshake_timeout, Some(cert_node))?;
-    on_up(&peer);
-    let end = ch.run_evented(outgoing, incoming, ep.timing, probe);
+    let opts = GreetOpts {
+        speak: ep.speak_for.map_or(PROTO_VERSION, |f| f(cert_node)),
+        paths: ep.paths_for.map_or(
+            PeerPaths {
+                kind: Kind::Other,
+                addrs: vec![],
+            },
+            |f| f(probe.local),
+        ),
+    };
+    let greeting = ch.greet(ep.me, &opts, ep.timing.handshake_timeout, Some(cert_node))?;
+    let peer = greeting.peer;
+    on_up(&LinkUp {
+        peer: peer.clone(),
+        ver: greeting.ver,
+        paths: greeting.paths,
+        local: probe.local,
+        remote: probe.remote,
+        dialed: probe.dialed,
+    });
+    let end = ch.run_evented(outgoing, incoming, ep.timing, probe.socket);
     Ok(Outcome { peer, end })
 }
 

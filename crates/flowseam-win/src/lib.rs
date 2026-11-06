@@ -115,6 +115,25 @@ pub fn pump_loop(
     }
 }
 
+#[cfg(windows)]
+pub type InjectorFactory = Box<dyn Fn() -> Box<dyn inject::Injector> + Sync>;
+#[cfg(windows)]
+pub type DisplayFactory = Box<dyn Fn() -> Result<Vec<flowseam_core::proto::Rect>, String> + Sync>;
+#[cfg(windows)]
+pub type ClipboardFactory = Box<dyn Fn() -> Result<Box<dyn Clipboard>, String> + Sync>;
+
+#[cfg(windows)]
+pub fn real_host_parts() -> (ClipboardFactory, InjectorFactory, DisplayFactory) {
+    if let Err(e) = win_input::dpi_aware() {
+        app::log(&format!("warning: {e}"));
+    }
+    (
+        Box::new(|| Ok(Box::new(win32::WinClipboard::new()?) as Box<dyn Clipboard>)),
+        Box::new(|| Box::new(win_input::SendInputInjector) as Box<dyn inject::Injector>),
+        Box::new(win_input::displays),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

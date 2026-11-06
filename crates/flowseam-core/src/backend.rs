@@ -94,6 +94,9 @@ pub trait InputEmitter {
     fn release_all(&mut self) -> Result<(), BackendError>;
     /// Idempotent. The backend tracks state itself; it does not count calls.
     fn set_cursor_visible(&mut self, visible: bool) -> Result<(), BackendError>;
+    /// Something other than this emitter put the cursor at `at` (a warp), or somewhere unknown (`None`).
+    /// An emitter that bases moves on its own last one starts from here instead.
+    fn cursor_placed(&mut self, _at: Option<Point>) {}
 }
 
 pub trait Clipboard {

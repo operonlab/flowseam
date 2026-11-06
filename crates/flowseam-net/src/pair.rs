@@ -122,14 +122,50 @@ pub fn pair_as_server(
     guard: &PairGuard,
 ) -> Result<Fingerprint, NetError> {
     let id = Identity::load_or_create(identity_dir)?;
+    serve_once(listener, code, &id, guard)
+}
+
+fn serve_once(listener: &TcpListener, code: &str, id: &Identity, guard: &PairGuard) -> Result<Fingerprint, NetError> {
     let (sock, _) = listener.accept().map_err(NetError::Io)?;
     if guard.locked() {
         drop(sock);
         return Err(NetError::Pair("配對暫時鎖定：失敗次數過多，請稍後再試".into()));
     }
-    let r = server_exchange(sock, &id, code, PAIR_TIMEOUT);
+    let r = server_exchange(sock, id, code, PAIR_TIMEOUT);
     guard.record(&r);
     r
+}
+
+/// Show `code` on `listener` until a client pairs and return its fingerprint, or `Ok(None)` once `stop()`
+/// is true. A connection that does not pair is skipped, not fatal: a wrong code (the guard counts those),
+/// a paired peer whose sharing worker dials in with a Hello, a port scan, a dropped link. Only our own
+/// identity failing to load ends the wait; it is loaded once, so nothing in the loop can fail that way.
+///
+/// ponytail: an accept() that keeps failing (EMFILE) spins this loop; back off if that is ever seen.
+pub fn serve_code(
+    listener: &TcpListener,
+    code: &str,
+    identity_dir: &Path,
+    guard: &PairGuard,
+    stop: impl Fn() -> bool,
+    mut log: impl FnMut(&str),
+) -> Result<Option<Fingerprint>, NetError> {
+    // A wait cancelled before it started reports cancelled, even when the identity would not load.
+    if stop() {
+        return Ok(None);
+    }
+    let id = Identity::load_or_create(identity_dir)?;
+    loop {
+        if stop() {
+            return Ok(None);
+        }
+        match serve_once(listener, code, &id, guard) {
+            Ok(fp) => return Ok(Some(fp)),
+            Err(_) if stop() => return Ok(None),
+            Err(e @ NetError::Pair(_)) => log(&format!("rejected: {e}")),
+            Err(e) => log(&format!("skipped a connection: {e}")),
+        }
+    }
 }
 
 /// A uniformly random 6-digit code. Rejection sampling avoids the modulo bias
@@ -435,6 +471,54 @@ mod tests {
         assert!(matches!(c_res, Err(NetError::Pair(_))), "client: {c_res:?}");
         assert!(matches!(s_res, Err(NetError::Pair(_))), "server: {s_res:?}");
         assert!(c_store.entries.is_empty() && s_pins == 0, "no pin through a man in the middle");
+    }
+
+    /// Two Macs: the one showing the code still has the other as a paired peer, whose sharing worker
+    /// keeps dialling the same port and opens with a Hello. A port scan connects and closes. Neither may end
+    /// the wait; the peer that types the code must still pair.
+    #[test]
+    fn serve_code_skips_connections_that_do_not_pair() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (srv_dir, cli_dir) = (crate::test_dir("serve-code-srv"), crate::test_dir("serve-code-cli"));
+        let _ = (std::fs::remove_dir_all(&srv_dir), std::fs::remove_dir_all(&cli_dir));
+        let dir = srv_dir.clone();
+        let server = std::thread::spawn(move || {
+            let mut lines = Vec::new();
+            let r = serve_code(&listener, "246810", &dir, &PairGuard::default(), || false, |l| lines.push(l.to_owned()));
+            (r, lines)
+        });
+
+        let mut sock = TcpStream::connect_timeout(&addr, T).unwrap();
+        link::prepare(&sock).unwrap();
+        let name = ServerName::try_from(SERVER_NAME).unwrap();
+        let mut conn = ClientConnection::new(tls::pairing_client_config(&Identity::generate().unwrap()).unwrap(), name).unwrap();
+        link::finish_handshake(&mut conn, &mut sock, T).unwrap();
+        let mut worker = Channel::new(StreamOwned::new(conn, sock));
+        worker.send(&Msg::Fault { code: 0, msg: "not a pairing message".into() }).unwrap();
+        assert!(worker.next_msg(deadline()).is_err(), "the server answers a non-pairing message by closing");
+        drop(TcpStream::connect(addr).unwrap());
+
+        let fp_server = pair_as_client(addr, "246810", &cli_dir).unwrap();
+        let (r, lines) = server.join().unwrap();
+        assert_eq!(r.unwrap(), Some(Identity::load_or_create(&cli_dir).unwrap().fingerprint()));
+        assert_eq!(fp_server, Identity::load_or_create(&srv_dir).unwrap().fingerprint());
+        assert_eq!(lines.iter().filter(|l| l.starts_with("skipped")).count(), 2, "{lines:?}");
+    }
+
+    /// Cancel pressed before the wait began: the window must say cancelled, not show an identity error.
+    #[test]
+    fn serve_code_stopped_before_it_starts_is_cancelled_even_without_an_identity() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let file = crate::test_dir("serve-code-no-identity");
+        let _ = std::fs::remove_dir_all(&file);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"a file where the identity directory would go").unwrap();
+        let unloadable = file.join("identity");
+        assert!(Identity::load_or_create(&unloadable).is_err(), "the test needs an identity that cannot load");
+        let r = serve_code(&listener, "246810", &unloadable, &PairGuard::default(), || true, |_| {});
+        assert!(matches!(r, Ok(None)), "{r:?}");
+        let _ = std::fs::remove_file(file);
     }
 
     #[test]

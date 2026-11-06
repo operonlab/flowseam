@@ -202,10 +202,99 @@ impl Outgoing {
     }
 }
 
+/// One incoming drag's files in staging, shared with a native drop session whose callbacks run on the OS's own
+/// threads. The pump writes and reports progress; a session waits for a file and takes it, or reads it as it grows.
+/// Nothing here touches a pump, so a target waiting on a slow transfer holds up no input. The staging folder goes
+/// when the last holder lets go.
+pub struct Staged {
+    dir: PathBuf,
+    files: Vec<FileMeta>,
+    state: std::sync::Mutex<Progress>,
+    changed: std::sync::Condvar,
+}
+
+struct Progress {
+    /// Bytes of each file on disk.
+    have: Vec<u64>,
+    /// Why no more bytes will come (cancelled, failed, the link went), once that is so.
+    over: Option<String>,
+}
+
+impl Staged {
+    fn new(dir: PathBuf, files: Vec<FileMeta>) -> Arc<Staged> {
+        let progress = Progress { have: vec![0; files.len()], over: None };
+        Arc::new(Staged { dir, files, state: std::sync::Mutex::new(progress), changed: std::sync::Condvar::new() })
+    }
+
+    pub fn files(&self) -> &[FileMeta] {
+        &self.files
+    }
+
+    pub fn path(&self, i: usize) -> PathBuf {
+        self.dir.join(format!("{i}.part"))
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Progress> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn grew(&self, i: usize, have: u64) {
+        self.lock().have[i] = have;
+        self.changed.notify_all();
+    }
+
+    fn end(&self, why: &str) {
+        let mut p = self.lock();
+        if p.over.is_none() {
+            p.over = Some(why.to_string());
+        }
+        drop(p);
+        self.changed.notify_all();
+    }
+
+    /// Block until file `i` has more than `at` bytes on disk, or all of them; returns how many it has. An error once
+    /// the drag is over and file `i` will never be complete.
+    pub fn wait_past(&self, i: usize, at: u64) -> Result<u64, String> {
+        let size = self.files.get(i).ok_or_else(|| format!("no file {i} in this drag"))?.size;
+        let mut p = self.lock();
+        loop {
+            if p.have[i] > at || p.have[i] == size {
+                return Ok(p.have[i]);
+            }
+            if let Some(why) = &p.over {
+                return Err(why.clone());
+            }
+            p = self.changed.wait(p).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+
+    /// Block until file `i` is complete, then move it to exactly `to` (where a drop target promised it would be).
+    pub fn deliver(&self, i: usize, to: &Path) -> Result<(), String> {
+        let size = self.files.get(i).ok_or_else(|| format!("no file {i} in this drag"))?.size;
+        while self.wait_past(i, size.saturating_sub(1))? < size {}
+        let from = self.path(i);
+        if fs::rename(&from, to).is_err() {
+            fs::copy(&from, to).map_err(|e| format!("無法存到 {}：{e}", to.display()))?;
+            let _ = fs::remove_file(&from);
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        if let Err(e) = fs::remove_dir_all(&self.dir) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                eprintln!("flowseam files: could not remove staging {}: {e}", self.dir.display());
+            }
+        }
+    }
+}
+
 /// Receiving side of one drag: files staged under their own folder, moved out on a drop.
 pub struct Incoming {
     drag: u32,
-    dir: PathBuf,
+    staged: Arc<Staged>,
     dest: PathBuf,
     files: Vec<FileMeta>,
     /// File the next chunk must belong to.
@@ -214,6 +303,8 @@ pub struct Incoming {
     got_in_file: u64,
     got: u64,
     dropped: bool,
+    /// A native drop target took the files: it reads them through `staged`, nothing lands in `dest`.
+    native: bool,
     landed: Vec<Option<PathBuf>>,
 }
 
@@ -223,7 +314,20 @@ impl Incoming {
         let dir = staging_root.join(format!("{drag}-{nanos}"));
         fs::create_dir_all(&dir).map_err(|e| format!("無法建立暫存資料夾 {}：{e}", dir.display()))?;
         let files: Vec<FileMeta> = files.iter().map(|f| FileMeta { name: safe_name(&f.name), size: f.size }).collect();
-        let mut inc = Incoming { drag, dir, dest: dest.to_path_buf(), landed: vec![None; files.len()], files, idx: 0, open: None, got_in_file: 0, got: 0, dropped: false };
+        let staged = Staged::new(dir, files.clone());
+        let mut inc = Incoming {
+            drag,
+            staged,
+            dest: dest.to_path_buf(),
+            landed: vec![None; files.len()],
+            files,
+            idx: 0,
+            open: None,
+            got_in_file: 0,
+            got: 0,
+            dropped: false,
+            native: false,
+        };
         for i in 0..inc.files.len() {
             if inc.files[i].size == 0 {
                 File::create(inc.staged(i)).map_err(|e| format!("無法建立暫存檔：{e}"))?;
@@ -238,7 +342,18 @@ impl Incoming {
     }
 
     fn staged(&self, i: usize) -> PathBuf {
-        self.dir.join(format!("{i}.part"))
+        self.staged.path(i)
+    }
+
+    /// The staged files, for a native drop target to wait on and take.
+    pub fn shared(&self) -> Arc<Staged> {
+        self.staged.clone()
+    }
+
+    /// A native drop target took the files: from now on they go to it, not to `dest`.
+    pub fn hand_off(&mut self) {
+        self.dropped = true;
+        self.native = true;
     }
 
     fn skip_empty(&mut self) {
@@ -262,6 +377,7 @@ impl Incoming {
         self.open.as_mut().expect("opened above").write_all(data).map_err(|e| format!("寫入暫存檔失敗：{e}"))?;
         self.got_in_file += data.len() as u64;
         self.got += data.len() as u64;
+        self.staged.grew(self.idx, self.got_in_file);
         if self.got_in_file == size {
             self.open = None;
             self.got_in_file = 0;
@@ -280,7 +396,7 @@ impl Incoming {
 
     fn settle(&mut self) -> Result<Vec<PathBuf>, String> {
         let mut out = Vec::new();
-        if !self.dropped {
+        if !self.dropped || self.native {
             return Ok(out);
         }
         for i in 0..self.files.len() {
@@ -298,20 +414,21 @@ impl Incoming {
         self.dropped
     }
 
-    /// Dropped and every file is in the destination.
+    /// Dropped and every file is in the destination (or, for a native target, every byte is staged for it).
     pub fn done(&self) -> bool {
-        self.dropped && self.landed.iter().all(Option::is_some)
+        match self.native {
+            true => self.idx >= self.files.len(),
+            false => self.dropped && self.landed.iter().all(Option::is_some),
+        }
     }
 }
 
 impl Drop for Incoming {
+    /// No more bytes will come; a native target still waiting on an unfinished file is told so. The folder itself
+    /// goes with the last holder of `staged`.
     fn drop(&mut self) {
         self.open = None;
-        if let Err(e) = fs::remove_dir_all(&self.dir) {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                eprintln!("flowseam files: could not remove staging {}: {e}", self.dir.display());
-            }
-        }
+        self.staged.end("拖曳已結束，檔案沒有傳完");
     }
 }
 
@@ -356,20 +473,93 @@ fn run_send(mut out: Outgoing, ctl: Receiver<Ctl>, send: &dyn Fn(Msg) -> bool) -
 pub type SendFn = Arc<dyn Fn(Msg) -> bool + Send + Sync>;
 
 /// Both directions of file drags for one link session.
+///
+/// Sending is two steps, so ordering on the link is right however fast the user is. The hub puts `DragSoon`
+/// on the link at the crossing, before any later input (the release above all); `announced` and then
+/// `start_announced` record it and stat and stream the files. A recipient that sees the release between
+/// `DragSoon` and `DragBegin` holds the drop until `DragBegin` arrives. Only one thread calls into a pump,
+/// the hub's, so a write stuck on a slow disk holds up drags and nothing else.
 pub struct DragPump {
     staging: PathBuf,
     dest: PathBuf,
     free: Option<FreeSpace>,
-    next_drag: u32,
     incoming: Option<Incoming>,
-    outgoing: Option<(u32, Sender<Ctl>)>,
+    /// Announced by the peer (`DragSoon`) and not yet begun; `true` once dropped here meanwhile.
+    pending: Option<(u32, bool)>,
+    /// Ours: announced (no sender thread yet) or streaming.
+    outgoing: Option<(u32, Option<Sender<Ctl>>)>,
+    /// Starts a system drag here for a drag arriving from the peer; without one a drop lands in `dest`.
+    native: Option<Arc<dyn NativeDrop>>,
+    /// The system drag carrying an incoming drag now, and how it reports its end (set by the hub).
+    session: Option<(u32, Box<dyn NativeSession>)>,
+    report: Option<NativeReport>,
 }
 
+/// A system drag on this machine for files arriving from the peer: a file-promise drag on macOS, a virtual-file
+/// drag on Windows. The drop target decides where the files go.
+pub trait NativeDrop: Send + Sync {
+    /// Start it under the cursor, with the primary button pressed by this call. `ended` must be called exactly once,
+    /// from any thread: `true` when a target took the files (it takes them through `staged`), `false` when the drag
+    /// ended without one or never got going.
+    fn begin(&self, drag: u32, staged: Arc<Staged>, ended: Box<dyn FnOnce(bool) + Send>) -> Result<Box<dyn NativeSession>, String>;
+}
+
+/// One running system drag.
+pub trait NativeSession: Send {
+    /// The drag is no longer ours to drop (carried back, or the sender cancelled): refuse any drop from now on and
+    /// end the system drag. Called on the hub's thread; must not block.
+    fn cancel(&self);
+}
+
+/// How a pump's system drag reports its end: (drag, a target took the files).
+pub type NativeReport = Arc<dyn Fn(u32, bool) + Send + Sync>;
+
 impl DragPump {
+    pub fn busy(&self) -> bool { self.incoming.is_some() || self.pending.is_some() || self.outgoing.is_some() || self.session.is_some() }
     /// `staging`: where unfinished files wait (ideally on the same volume as `dest`). `dest`: where a
     /// dropped file lands, the Downloads folder.
     pub fn new(staging: PathBuf, dest: PathBuf) -> Self {
-        DragPump { staging, dest, free: None, next_drag: 1, incoming: None, outgoing: None }
+        DragPump { staging, dest, free: None, incoming: None, pending: None, outgoing: None, native: None, session: None, report: None }
+    }
+
+    /// Carry each drag that arrives on as a system drag here, so it can be dropped anywhere a file can.
+    pub fn with_native(mut self, native: Arc<dyn NativeDrop>) -> Self {
+        self.native = Some(native);
+        self
+    }
+
+    fn end_session(&mut self, why: &str) {
+        if let Some((drag, s)) = self.session.take() {
+            flowseam_core::log::line(&format!("flowseam files: ending the system drag for drag {drag} ({why})"));
+            s.cancel();
+        }
+    }
+
+    /// Hand the arriving drag to a system drag here. Without one, or if it cannot start, a release here drops the
+    /// files into `dest` as before.
+    fn start_native(&mut self, drag: u32) {
+        let (Some(native), Some(report), Some(inc)) = (self.native.clone(), self.report.clone(), self.incoming.as_ref()) else { return };
+        match native.begin(drag, inc.shared(), Box::new(move |took| report(drag, took))) {
+            Ok(s) => self.session = Some((drag, s)),
+            Err(e) => eprintln!("flowseam files: no system drag for drag {drag} ({e}); a release here saves to Downloads"),
+        }
+    }
+
+    /// The system drag for `drag` ended. A target that took the files gets them as they finish; with no target the
+    /// files land in `dest`, as a plain release would have done.
+    pub fn on_native_end(&mut self, drag: u32, took: bool, send: &dyn Fn(Msg) -> bool) -> Vec<PathBuf> {
+        if !self.session.as_ref().is_some_and(|(d, _)| *d == drag) {
+            return Vec::new(); // cancelled meanwhile, or replaced by a newer drag
+        }
+        self.session = None;
+        let Some(inc) = self.incoming.as_mut().filter(|i| i.drag() == drag) else { return Vec::new() };
+        if took {
+            inc.hand_off();
+            self.finish_if_done();
+            return Vec::new();
+        }
+        eprintln!("flowseam files: drag {drag} ended over nothing that takes files; saving to Downloads");
+        self.drop_incoming(send)
     }
 
     /// Refuse a drag that would leave less than `RESERVE_BYTES` free where it lands.
@@ -395,16 +585,24 @@ impl DragPump {
         }
     }
 
-    /// A file drag left this machine for the peer: announce it and start streaming. Replaces any drag
-    /// still being sent.
-    pub fn start(&mut self, paths: &[PathBuf], send: SendFn) {
-        self.cancel_outgoing(&*send);
-        let drag = self.next_drag;
-        self.next_drag = self.next_drag.wrapping_add(1).max(1);
+    /// `DragSoon { drag }` is going to the peer: cancel any drag still being sent and expect this one, so a
+    /// cancel from the peer that arrives before `start_announced` stops it. Call it before `DragSoon` leaves.
+    pub fn announced(&mut self, drag: u32, send: &dyn Fn(Msg) -> bool) {
+        self.cancel_outgoing(send);
+        self.outgoing = Some((drag, None));
+    }
+
+    /// Stat `paths` and stream them as `drag`, unless the peer cancelled it or a newer drag replaced it.
+    pub fn start_announced(&mut self, drag: u32, paths: &[PathBuf], send: SendFn) {
+        if self.outgoing.as_ref().map(|(d, tx)| (*d, tx.is_none())) != Some((drag, true)) {
+            return;
+        }
         let (out, begin, skipped) = match Outgoing::new(drag, paths) {
             Ok(x) => x,
             Err(e) => {
                 eprintln!("flowseam files: drag not sent: {e}");
+                self.outgoing = None;
+                send(Msg::DragCancel { drag });
                 return;
             }
         };
@@ -412,28 +610,51 @@ impl DragPump {
             eprintln!("flowseam files: skipped {s}");
         }
         if !send(begin) {
+            self.outgoing = None;
             return;
         }
         let (tx, rx) = channel();
-        self.outgoing = Some((drag, tx));
+        self.outgoing = Some((drag, Some(tx)));
         std::thread::spawn(move || {
             let why = run_send(out, rx, &*send);
             eprintln!("flowseam files: drag {drag} sent: {why}");
         });
     }
 
+    /// The whole send in one call, for a caller that owns the pump outright.
+    pub fn start(&mut self, drag: u32, paths: &[PathBuf], send: SendFn) {
+        self.announced(drag, &*send);
+        send(Msg::DragSoon { drag });
+        self.start_announced(drag, paths, send);
+    }
+
     fn cancel_outgoing(&mut self, send: &dyn Fn(Msg) -> bool) {
         if let Some((drag, tx)) = self.outgoing.take() {
-            if tx.send(Ctl::Cancel).is_ok() {
-                send(Msg::DragCancel { drag });
+            if let Some(tx) = tx {
+                let _ = tx.send(Ctl::Cancel);
             }
+            send(Msg::DragCancel { drag });
         }
     }
 
     /// A drag message from the peer. Returns the files that landed in the destination because of it.
     pub fn on_msg(&mut self, msg: Msg, send: &dyn Fn(Msg) -> bool) -> Vec<PathBuf> {
         match msg {
+            Msg::DragSoon { drag } => {
+                self.end_session("another drag is coming");
+                self.incoming = None;
+                self.pending = Some((drag, false));
+                Vec::new()
+            }
             Msg::DragBegin { drag, files } => {
+                let dropped = match self.pending.take() {
+                    Some((d, dropped)) if d == drag => dropped,
+                    // Not announced, or cancelled here already (the cursor came back first).
+                    _ => {
+                        send(Msg::DragCancel { drag });
+                        return Vec::new();
+                    }
+                };
                 self.incoming = None;
                 let total = files.iter().fold(0u64, |t, f| t.saturating_add(f.size));
                 if let Err(e) = self.room_for(total) {
@@ -442,7 +663,14 @@ impl DragPump {
                     return Vec::new();
                 }
                 match Incoming::begin(&self.staging, &self.dest, drag, &files) {
-                    Ok(inc) => self.incoming = Some(inc),
+                    Ok(inc) => {
+                        self.incoming = Some(inc);
+                        // Let go before the data was announced: the drop already happened here.
+                        if dropped {
+                            return self.drop_incoming(send);
+                        }
+                        self.start_native(drag);
+                    }
                     Err(e) => {
                         eprintln!("flowseam files: cannot receive drag {drag}: {e}");
                         send(Msg::DragCancel { drag });
@@ -467,7 +695,7 @@ impl DragPump {
                 }
             }
             Msg::DragAck { drag, bytes } => {
-                if let Some((d, tx)) = &self.outgoing {
+                if let Some((d, Some(tx))) = &self.outgoing {
                     if *d == drag && tx.send(Ctl::Ack(bytes)).is_err() {
                         self.outgoing = None;
                     }
@@ -477,10 +705,14 @@ impl DragPump {
             Msg::DragCancel { drag } => {
                 if self.incoming.as_ref().is_some_and(|i| i.drag() == drag) {
                     eprintln!("flowseam files: peer cancelled drag {drag}");
+                    self.end_session("peer cancelled");
                     self.incoming = None;
                 }
+                if self.pending.is_some_and(|(d, _)| d == drag) {
+                    self.pending = None;
+                }
                 if self.outgoing.as_ref().is_some_and(|(d, _)| *d == drag) {
-                    if let Some((_, tx)) = self.outgoing.take() {
+                    if let Some((_, Some(tx))) = self.outgoing.take() {
                         let _ = tx.send(Ctl::Cancel);
                     }
                 }
@@ -490,9 +722,23 @@ impl DragPump {
         }
     }
 
-    /// The primary button came up on this machine: a drag received from the peer is dropped here.
+    /// The primary button came up on this machine: a drag received from the peer is dropped here, or, if
+    /// only announced so far, dropped the moment it begins.
     pub fn on_primary_up(&mut self, send: &dyn Fn(Msg) -> bool) -> Vec<PathBuf> {
-        let Some(inc) = self.incoming.as_mut().filter(|i| !i.dropped()) else { return Vec::new() };
+        if self.session.is_some() {
+            return Vec::new(); // the release is the system drag's drop; it reports where it went
+        }
+        if self.incoming.as_ref().is_some_and(|i| !i.dropped()) {
+            return self.drop_incoming(send);
+        }
+        if let Some((_, dropped)) = self.pending.as_mut() {
+            *dropped = true;
+        }
+        Vec::new()
+    }
+
+    fn drop_incoming(&mut self, send: &dyn Fn(Msg) -> bool) -> Vec<PathBuf> {
+        let Some(inc) = self.incoming.as_mut() else { return Vec::new() };
         let drag = inc.drag();
         match inc.drop_here() {
             Ok(landed) => {
@@ -508,11 +754,17 @@ impl DragPump {
         }
     }
 
-    /// The cursor left this machine with the button still down: a received drag that was not dropped goes back.
+    /// The cursor left this machine with the button still down: a received drag that was not dropped goes
+    /// back, whether its data had begun or was only announced.
     pub fn on_cross_away(&mut self, send: &dyn Fn(Msg) -> bool) {
+        self.end_session("the cursor left this machine");
         if let Some(inc) = self.incoming.as_ref().filter(|i| !i.dropped()) {
             let drag = inc.drag();
             self.incoming = None;
+            send(Msg::DragCancel { drag });
+        }
+        if let Some((drag, false)) = self.pending {
+            self.pending = None;
             send(Msg::DragCancel { drag });
         }
     }
@@ -526,7 +778,8 @@ impl DragPump {
 
 impl Drop for DragPump {
     fn drop(&mut self) {
-        if let Some((_, tx)) = self.outgoing.take() {
+        self.end_session("its link closed");
+        if let Some((_, Some(tx))) = self.outgoing.take() {
             let _ = tx.send(Ctl::Cancel);
         }
     }
@@ -540,21 +793,53 @@ pub trait DragSource: Send + Sync {
     fn files(&self) -> Result<Vec<PathBuf>, String>;
 }
 
-type Links = Arc<std::sync::Mutex<Vec<(String, Arc<std::sync::Mutex<DragPump>>, SendFn)>>>;
+/// One link's pump and how to send on that link, plus the ids its outgoing drags are numbered with. The ids
+/// live outside the pump so the crossing can number a drag without taking the pump's lock.
+#[derive(Clone)]
+pub struct DragLink {
+    peer: String,
+    pump: Arc<std::sync::Mutex<DragPump>>,
+    send: SendFn,
+    next_drag: Arc<std::sync::atomic::AtomicU32>,
+}
 
+type Links = Arc<std::sync::Mutex<Vec<DragLink>>>;
+
+/// Work for the hub's thread, the only thread that touches a pump. Everything about drags (messages from
+/// the links, releases, crossings, starts) is one queue, handled in the order it happened. Each job carries
+/// the links as they were when it was queued, so a link that reconnects meanwhile is not touched by a job
+/// meant for the old one.
 enum Job {
-    Up,
-    Away { peer: String, send: bool },
+    Msg(DragLink, Msg),
+    /// A system drag ended; reported from the OS's thread. Weak: a pump that is gone has nothing left to do.
+    NativeEnded { pump: std::sync::Weak<std::sync::Mutex<DragPump>>, send: SendFn, drag: u32, took: bool },
+    Announced { link: DragLink, drag: u32 },
+    Up(Vec<DragLink>),
+    Away(Vec<DragLink>),
+    Start { link: DragLink, drag: u32, files: Vec<PathBuf> },
     Flush(Sender<()>),
 }
 
-/// Every live link's `DragPump` and this machine's drag source, behind the forwarder's two drag hooks.
+/// Where a link's router hands the drag messages it receives: into the hub's queue, never into a lock.
+#[derive(Clone)]
+pub struct DragInbox {
+    link: DragLink,
+    jobs: Sender<Job>,
+}
+
+impl DragInbox {
+    pub fn deliver(&self, msg: Msg) {
+        queue(&self.jobs, Job::Msg(self.link.clone(), msg));
+    }
+}
+
+/// Every live link's `DragPump` and this machine's drag source, behind the forwarder's drag hooks.
 ///
-/// The hooks run under the forwarder's lock, on the event tap's thread on a Mac, where blocking stalls
-/// every key and mouse event and a slow tap gets disabled by the OS. So a hook only takes the one decision
-/// that must be made then (did a drag start during this press, to cancel it here); reading the file list,
-/// statting files, writing and moving staged data all happen on the hub's own thread, in hook order.
-/// Lock order there: the link list, then a pump. Nothing that holds a pump takes the list.
+/// The hooks run under the forwarder's lock, on the event tap's thread on a Mac, where blocking stalls every
+/// key and mouse event and a slow tap gets disabled by the OS. A hook does only what must happen at that
+/// moment and nothing that can wait on a disk: read the drag pasteboard (the generation, and at a crossing
+/// the file list, so the decision to cancel the local drag is about files and the files are the ones dragged
+/// then), put `DragSoon` on the link, and queue the rest. The pumps belong to the hub's thread alone.
 pub struct DragHub {
     source: Option<Arc<dyn DragSource>>,
     /// Drag generation when the primary button went down; a drag started during this press if it moved.
@@ -564,28 +849,38 @@ pub struct DragHub {
 }
 
 impl DragHub {
+    pub fn busy(&self, peer: &str) -> bool { self.links.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|l| l.peer == peer).is_some_and(|l| lock(&l.pump).busy()) }
     /// `source: None` on a machine that cannot start drags yet: it still receives them.
     pub fn new(source: Option<Box<dyn DragSource>>) -> Self {
         let source: Option<Arc<dyn DragSource>> = source.map(Arc::from);
-        let links: Links = Arc::default();
         let (jobs, rx) = channel();
-        let (l, src) = (links.clone(), source.clone());
-        std::thread::Builder::new()
-            .name("flowseam-drags".into())
-            .spawn(move || run_jobs(rx, &l, src.as_deref()))
-            .expect("spawn drag thread");
-        DragHub { source, baseline: None, links, jobs }
+        std::thread::Builder::new().name("flowseam-drags".into()).spawn(move || run_jobs(rx)).expect("spawn drag thread");
+        DragHub { source, baseline: None, links: Arc::default(), jobs }
     }
 
     pub fn attach(&mut self, peer: &str, pump: Arc<std::sync::Mutex<DragPump>>, send: SendFn) {
+        let (weak, jobs, report_send) = (Arc::downgrade(&pump), self.jobs.clone(), send.clone());
+        lock(&pump).report = Some(Arc::new(move |drag, took| {
+            queue(&jobs, Job::NativeEnded { pump: weak.clone(), send: report_send.clone(), drag, took });
+        }));
         let mut l = self.links.lock().unwrap_or_else(|e| e.into_inner());
-        l.retain(|(p, ..)| p != peer);
-        l.push((peer.to_string(), pump, send));
+        l.retain(|x| x.peer != peer);
+        l.push(DragLink { peer: peer.to_string(), pump, send, next_drag: Arc::new(std::sync::atomic::AtomicU32::new(1)) });
+    }
+
+    /// The queue entry for `peer`'s router, once attached.
+    pub fn inbox(&self, peer: &str) -> Option<DragInbox> {
+        let l = self.links.lock().unwrap_or_else(|e| e.into_inner());
+        l.iter().find(|x| x.peer == peer).map(|link| DragInbox { link: link.clone(), jobs: self.jobs.clone() })
     }
 
     /// Forget `peer`'s pump if it is still this one (a newer session may have replaced it).
     pub fn detach(&mut self, peer: &str, pump: &Arc<std::sync::Mutex<DragPump>>) {
-        self.links.lock().unwrap_or_else(|e| e.into_inner()).retain(|(p, q, _)| !(p == peer && Arc::ptr_eq(q, pump)));
+        self.links.lock().unwrap_or_else(|e| e.into_inner()).retain(|x| !(x.peer == peer && Arc::ptr_eq(&x.pump, pump)));
+    }
+
+    fn snapshot(&self) -> Vec<DragLink> {
+        self.links.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// The primary button changed here. A press reads the drag generation (one pasteboard call); a release
@@ -602,7 +897,7 @@ impl DragHub {
             };
         } else {
             self.baseline = None;
-            let _ = self.jobs.send(Job::Up);
+            queue(&self.jobs, Job::Up(self.snapshot()));
         }
     }
 
@@ -615,10 +910,12 @@ impl DragHub {
         }
     }
 
-    /// The cursor leaves for `peer`. A drag received here and not dropped goes back; a drag that started
-    /// here during this press is sent to `peer`. True when a drag started during this press, so the caller
-    /// cancels it here instead of letting it drop at the edge.
+    /// The cursor leaves for `peer`. A drag received here and not dropped goes back. A drag of files that
+    /// started here during this press is announced to `peer` now and streamed from the hub's thread. True
+    /// only when files left, so the caller cancels the local drag; a text or image drag is left alone.
     pub fn drag_away(&mut self, peer: &str) -> bool {
+        let all = self.snapshot();
+        queue(&self.jobs, Job::Away(all.clone()));
         let started = match (self.baseline.take(), self.source.as_ref()) {
             (Some(base), Some(src)) => match src.generation() {
                 Ok(g) => g != base, // unchanged: a window was dragged, not a new drag
@@ -629,12 +926,31 @@ impl DragHub {
             },
             _ => false,
         };
-        let linked = self.links.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|(p, ..)| p == peer);
-        if started && !linked {
-            eprintln!("flowseam files: no live link to {peer}; drag not sent");
+        if !started {
+            return false;
         }
-        let _ = self.jobs.send(Job::Away { peer: peer.to_string(), send: started && linked });
-        started && linked
+        let files = match self.source.as_ref().map(|s| s.files()) {
+            Some(Ok(f)) if !f.is_empty() => f,
+            Some(Ok(_)) | None => return false, // text or an image was dragged, not files
+            Some(Err(e)) => {
+                eprintln!("flowseam files: dragged files unreadable: {e}");
+                return false;
+            }
+        };
+        let Some(link) = all.into_iter().find(|x| x.peer == peer) else {
+            eprintln!("flowseam files: no live link to {peer}; drag not sent");
+            return false;
+        };
+        let drag = match link.next_drag.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+            0 => link.next_drag.fetch_add(1, std::sync::atomic::Ordering::SeqCst), // 0 is never an id
+            d => d,
+        };
+        // Queued before `DragSoon` leaves, so the peer's answer to it can only be handled after.
+        queue(&self.jobs, Job::Announced { link: link.clone(), drag });
+        // On the link before any input that follows the crossing (the release above all).
+        (link.send)(Msg::DragSoon { drag });
+        queue(&self.jobs, Job::Start { link, drag, files });
+        true
     }
 
     /// Wait until every hook so far has been handled (tests, and anyone who needs the files settled).
@@ -644,45 +960,47 @@ impl DragHub {
     }
 }
 
-fn run_jobs(rx: Receiver<Job>, links: &Links, source: Option<&dyn DragSource>) {
+/// The drag thread only goes away by panicking (it holds the receiver for good); after that every drag is
+/// lost, so each lost one says so.
+fn queue(jobs: &Sender<Job>, job: Job) {
+    if jobs.send(job).is_err() {
+        eprintln!("flowseam files: the drag thread is gone; file drags are off until restart");
+    }
+}
+
+fn run_jobs(rx: Receiver<Job>) {
     while let Ok(job) = rx.recv() {
-        let all = links.lock().unwrap_or_else(|e| e.into_inner()).clone();
         match job {
-            Job::Up => {
-                for (_, pump, send) in &all {
-                    for p in lock(pump).on_primary_up(&**send) {
+            Job::Msg(link, msg) => {
+                for p in lock(&link.pump).on_msg(msg, &*link.send) {
+                    eprintln!("flowseam files: saved {}", p.display());
+                }
+            }
+            Job::NativeEnded { pump, send, drag, took } => {
+                if let Some(pump) = pump.upgrade() {
+                    for p in lock(&pump).on_native_end(drag, took, &*send) {
                         eprintln!("flowseam files: saved {}", p.display());
                     }
                 }
             }
-            Job::Away { peer, send } => {
-                for (_, pump, s) in &all {
-                    lock(pump).on_cross_away(&**s);
-                }
-                if send {
-                    start_drag(&all, &peer, source);
+            Job::Up(all) => {
+                for link in &all {
+                    for p in lock(&link.pump).on_primary_up(&*link.send) {
+                        eprintln!("flowseam files: saved {}", p.display());
+                    }
                 }
             }
+            Job::Away(all) => {
+                for link in &all {
+                    lock(&link.pump).on_cross_away(&*link.send);
+                }
+            }
+            Job::Announced { link, drag } => lock(&link.pump).announced(drag, &*link.send),
+            Job::Start { link, drag, files } => lock(&link.pump).start_announced(drag, &files, link.send.clone()),
             Job::Flush(done) => {
                 let _ = done.send(());
             }
         }
-    }
-}
-
-fn start_drag(all: &[(String, Arc<std::sync::Mutex<DragPump>>, SendFn)], peer: &str, source: Option<&dyn DragSource>) {
-    let Some(src) = source else { return };
-    let files = match src.files() {
-        Ok(f) if !f.is_empty() => f,
-        Ok(_) => return, // text or an image was dragged, not files
-        Err(e) => {
-            eprintln!("flowseam files: dragged files unreadable: {e}");
-            return;
-        }
-    };
-    match all.iter().find(|(p, ..)| p == peer) {
-        Some((_, pump, send)) => lock(pump).start(&files, send.clone()),
-        None => eprintln!("flowseam files: no live link to {peer}; drag not sent"),
     }
 }
 
@@ -694,6 +1012,28 @@ fn lock(p: &std::sync::Mutex<DragPump>) -> std::sync::MutexGuard<'_, DragPump> {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    #[test]
+    fn busy_tracks_every_transfer_state() {
+        struct Stub;
+        impl NativeSession for Stub { fn cancel(&self) {} }
+        let t = Tmp::new("busy");
+        let mut p = DragPump::new(t.sub("staging"), t.sub("dest"));
+        assert!(!p.busy());
+        p.pending = Some((1, false)); assert!(p.busy()); p.pending = None;
+        p.outgoing = Some((1, None)); assert!(p.busy()); p.outgoing = None;
+        p.session = Some((1, Box::new(Stub))); assert!(p.busy()); p.session = None;
+        p.incoming = Some(Incoming::begin(&p.staging, &p.dest, 1, &[]).unwrap()); assert!(p.busy());
+    }
+
+    #[test]
+    fn hub_busy_is_scoped_to_peer() {
+        let mut h = DragHub::new(None);
+        let p = Arc::new(Mutex::new(DragPump::new(PathBuf::new(), PathBuf::new())));
+        h.attach("peer", p.clone(), Arc::new(|_| true));
+        assert!(!h.busy("peer")); assert!(!h.busy("missing"));
+        p.lock().unwrap().pending = Some((1, false)); assert!(h.busy("peer")); assert!(!h.busy("missing"));
+    }
 
     struct Tmp(PathBuf);
     impl Tmp {
@@ -976,12 +1316,14 @@ mod tests {
         fs::write(src.join("a"), b"x").unwrap();
         let (mut hub, _, sent, pump) = hub_with(&t, &src.join("a"));
         let noop = |_m: Msg| true;
+        pump.lock().unwrap().on_msg(Msg::DragSoon { drag: 3 }, &noop);
         pump.lock().unwrap().on_msg(Msg::DragBegin { drag: 3, files: vec![FileMeta { name: "got.txt".into(), size: 2 }] }, &noop);
         pump.lock().unwrap().on_msg(Msg::FileChunk { drag: 3, file: 0, data: b"hi".to_vec() }, &noop);
         hub.primary(false);
         assert!(hub.flush(Duration::from_secs(2)));
         assert_eq!(fs::read(t.0.join("dest/got.txt")).unwrap(), b"hi");
         // A received drag carried back out instead is cancelled toward its sender.
+        pump.lock().unwrap().on_msg(Msg::DragSoon { drag: 4 }, &noop);
         pump.lock().unwrap().on_msg(Msg::DragBegin { drag: 4, files: vec![FileMeta { name: "no.txt".into(), size: 2 }] }, &noop);
         hub.drag_away("peer");
         assert!(hub.flush(Duration::from_secs(2)));
@@ -989,39 +1331,154 @@ mod tests {
         assert!(entries(&t.0.join("staging")).is_empty());
     }
 
-    /// The hooks run on the event tap's thread: a slow file list (a network volume, hundreds of items)
-    /// must not hold up the crossing.
+    /// The drag is on the link before the crossing returns, ahead of any input that follows it; the
+    /// files streamed are the ones dragged at the crossing, even if the pasteboard changes right after.
     #[test]
-    fn a_crossing_never_waits_on_the_file_list() {
-        struct Slow(Mutex<u64>);
-        impl DragSource for Slow {
-            fn generation(&self) -> Result<u64, String> {
-                Ok(*self.0.lock().unwrap())
-            }
-            fn files(&self) -> Result<Vec<PathBuf>, String> {
-                std::thread::sleep(Duration::from_millis(800));
-                Ok(Vec::new())
-            }
-        }
-        let t = Tmp::new("slow");
-        let src = Arc::new(Slow(Mutex::new(1)));
-        struct Shared(Arc<Slow>);
-        impl DragSource for Shared {
-            fn generation(&self) -> Result<u64, String> {
-                self.0.generation()
-            }
-            fn files(&self) -> Result<Vec<PathBuf>, String> {
-                self.0.files()
-            }
-        }
-        let mut hub = DragHub::new(Some(Box::new(Shared(src.clone()))));
-        hub.attach("peer", Arc::new(Mutex::new(DragPump::new(t.sub("s"), t.sub("d")))), Arc::new(|_| true));
+    fn a_crossing_announces_at_once_and_sends_the_files_dragged_then() {
+        let t = Tmp::new("announce");
+        let src = t.sub("src");
+        fs::write(src.join("then.txt"), b"then").unwrap();
+        fs::write(src.join("later.txt"), b"later").unwrap();
+        let (mut hub, state, sent, _) = hub_with(&t, &src.join("then.txt"));
         hub.primary(true);
-        *src.0.lock().unwrap() += 1;
-        let t0 = std::time::Instant::now();
+        state.lock().unwrap().0 += 1;
         assert!(hub.drag_away("peer"));
-        assert!(t0.elapsed() < Duration::from_millis(300), "crossing waited {:?}", t0.elapsed());
-        assert!(hub.flush(Duration::from_secs(3)));
+        assert!(matches!(sent.lock().unwrap().first(), Some(Msg::DragSoon { .. })), "{:?}", sent.lock().unwrap());
+        state.lock().unwrap().1 = vec![src.join("later.txt")];
+        assert!(hub.flush(Duration::from_secs(2)));
+        let names: Vec<String> = sent
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|m| match m {
+                Msg::DragBegin { files, .. } => Some(files[0].name.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, vec!["then.txt"]);
+    }
+
+    /// Text or an image dragged to the edge is not a file drag: nothing is announced and the local drag is
+    /// left alone (the caller would otherwise cancel it with Escape).
+    #[test]
+    fn a_drag_without_files_is_left_alone() {
+        let t = Tmp::new("text");
+        let (mut hub, state, sent, _) = hub_with(&t, &t.0.join("unused"));
+        state.lock().unwrap().1.clear();
+        hub.primary(true);
+        state.lock().unwrap().0 += 1;
+        assert!(!hub.drag_away("peer"));
+        assert!(hub.flush(Duration::from_secs(2)));
+        assert!(sent.lock().unwrap().is_empty(), "{:?}", sent.lock().unwrap());
+    }
+
+    /// Let go before `DragBegin` arrives (it trails `DragSoon` by a stat): the drop still happens.
+    #[test]
+    fn a_release_before_the_data_is_announced_is_still_the_drop() {
+        let t = Tmp::new("early-up");
+        let (staging, dest) = (t.sub("staging"), t.sub("dest"));
+        let noop = |_m: Msg| true;
+        let mut pump = DragPump::new(staging, dest.clone());
+        pump.on_msg(Msg::DragSoon { drag: 5 }, &noop);
+        assert!(pump.on_primary_up(&noop).is_empty());
+        pump.on_msg(Msg::DragBegin { drag: 5, files: vec![FileMeta { name: "a.txt".into(), size: 2 }] }, &noop);
+        let landed = pump.on_msg(Msg::FileChunk { drag: 5, file: 0, data: b"ok".to_vec() }, &noop);
+        assert_eq!(landed, vec![dest.join("a.txt")]);
+        assert_eq!(fs::read(dest.join("a.txt")).unwrap(), b"ok");
+    }
+
+    /// Carried back before `DragBegin` arrives: cancelled toward the sender, and the late data is refused.
+    #[test]
+    fn an_announced_drag_carried_back_is_cancelled_and_its_data_refused() {
+        let t = Tmp::new("early-away");
+        let (staging, dest) = (t.sub("staging"), t.sub("dest"));
+        let sent = Mutex::new(Vec::new());
+        let send = |m: Msg| { sent.lock().unwrap().push(m); true };
+        let mut pump = DragPump::new(staging.clone(), dest.clone());
+        pump.on_msg(Msg::DragSoon { drag: 6 }, &send);
+        pump.on_cross_away(&send);
+        assert_eq!(*sent.lock().unwrap(), vec![Msg::DragCancel { drag: 6 }]);
+        pump.on_msg(Msg::DragBegin { drag: 6, files: vec![FileMeta { name: "a.txt".into(), size: 2 }] }, &send);
+        pump.on_msg(Msg::FileChunk { drag: 6, file: 0, data: b"no".to_vec() }, &send);
+        pump.on_primary_up(&send);
+        assert!(entries(&staging).is_empty() && entries(&dest).is_empty());
+    }
+
+    /// A peer's cancel that arrives before our hub thread starts the announced drag stops it.
+    #[test]
+    fn a_cancel_before_the_stream_starts_stops_it() {
+        let t = Tmp::new("pre-cancel");
+        let src = t.sub("src");
+        fs::write(src.join("a"), b"x").unwrap();
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let s = sent.clone();
+        let send: SendFn = Arc::new(move |m| { s.lock().unwrap().push(m); true });
+        let mut pump = DragPump::new(t.sub("staging"), t.sub("dest"));
+        pump.announced(7, &*send);
+        pump.on_msg(Msg::DragCancel { drag: 7 }, &*send);
+        pump.start_announced(7, &[src.join("a")], send.clone());
+        assert!(!sent.lock().unwrap().iter().any(|m| matches!(m, Msg::DragBegin { .. })), "{:?}", sent.lock().unwrap());
+    }
+
+    /// The same through the hub, with the peer answering `DragSoon` the instant it leaves: the answer is
+    /// handled after the hub learns of the drag, so it still stops the stream.
+    #[test]
+    fn a_cancel_answering_the_announcement_stops_the_stream() {
+        let t = Tmp::new("instant-cancel");
+        let src = t.sub("src");
+        fs::write(src.join("a"), b"x").unwrap();
+        let state = Arc::new(Mutex::new((5, vec![src.join("a")])));
+        let mut hub = DragHub::new(Some(Box::new(FakeSource(state.clone()))));
+        let inbox: Arc<std::sync::OnceLock<DragInbox>> = Arc::default();
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let (s, ib) = (sent.clone(), inbox.clone());
+        hub.attach(
+            "peer",
+            Arc::new(Mutex::new(DragPump::new(t.sub("staging"), t.sub("dest")))),
+            Arc::new(move |m| {
+                if let Msg::DragSoon { drag } = m {
+                    ib.get().unwrap().deliver(Msg::DragCancel { drag });
+                }
+                s.lock().unwrap().push(m);
+                true
+            }),
+        );
+        inbox.set(hub.inbox("peer").unwrap()).ok().unwrap();
+        hub.primary(true);
+        state.lock().unwrap().0 += 1;
+        assert!(hub.drag_away("peer"));
+        assert!(hub.flush(Duration::from_secs(2)));
+        assert!(!began(&sent), "{:?}", sent.lock().unwrap());
+    }
+
+    /// The crossing, the release and an arriving chunk run on the event tap's thread and the routers. None of
+    /// them may wait on a pump: a pump can be stuck writing to a slow disk, and a stuck tap freezes the
+    /// mouse and keyboard of the whole machine.
+    #[test]
+    fn nothing_on_the_input_path_waits_on_a_busy_pump() {
+        let t = Tmp::new("busy");
+        let src = t.sub("src");
+        fs::write(src.join("a"), b"x").unwrap();
+        let (mut hub, state, sent, pump) = hub_with(&t, &src.join("a"));
+        let inbox = hub.inbox("peer").unwrap();
+        let busy = pump.lock().unwrap(); // a FileChunk write stuck on the disk
+        let (done, finished) = channel();
+        let worker = std::thread::spawn(move || {
+            hub.primary(true);
+            state.lock().unwrap().0 += 1;
+            let left = hub.drag_away("peer");
+            hub.primary(false);
+            inbox.deliver(Msg::DragSoon { drag: 9 });
+            done.send(left).unwrap();
+            hub
+        });
+        let left = finished.recv_timeout(Duration::from_secs(1));
+        drop(busy);
+        let hub = worker.join().unwrap();
+        assert_eq!(left, Ok(true), "the input path waited on the pump");
+        assert!(matches!(sent.lock().unwrap().first(), Some(Msg::DragSoon { .. })), "announced at the crossing");
+        assert!(hub.flush(Duration::from_secs(2)));
+        assert!(began(&sent), "streamed once the pump was free: {:?}", sent.lock().unwrap());
     }
 
     #[test]
@@ -1032,16 +1489,174 @@ mod tests {
         let send = |m: Msg| { sent.lock().unwrap().push(m); true };
         let begin = |size| Msg::DragBegin { drag: 2, files: vec![FileMeta { name: "big".into(), size }] };
         let mut pump = DragPump::new(staging.clone(), dest.clone()).with_free_space(Arc::new(|_| Ok(RESERVE_BYTES + 100)));
+        pump.on_msg(Msg::DragSoon { drag: 2 }, &send);
         pump.on_msg(begin(101), &send);
         assert_eq!(*sent.lock().unwrap(), vec![Msg::DragCancel { drag: 2 }]);
         assert!(entries(&staging).is_empty());
         sent.lock().unwrap().clear();
+        pump.on_msg(Msg::DragSoon { drag: 2 }, &send);
         pump.on_msg(begin(100), &send);
         assert!(sent.lock().unwrap().is_empty(), "exactly fits: accepted");
         // Space that cannot be measured is not a refusal.
         let mut pump = DragPump::new(staging, dest).with_free_space(Arc::new(|_| Err("statvfs failed".into())));
+        pump.on_msg(Msg::DragSoon { drag: 2 }, &send);
         pump.on_msg(begin(u64::MAX), &send);
         assert!(sent.lock().unwrap().is_empty());
+    }
+
+    /// A system drag that hands its `ended` to the test and remembers whether it was cancelled.
+    type Ended = Box<dyn FnOnce(bool) + Send>;
+    type Began = (u32, Arc<Staged>, Option<Ended>, Arc<std::sync::atomic::AtomicBool>);
+    #[derive(Clone, Default)]
+    struct FakeNative(Arc<Mutex<Vec<Began>>>);
+    struct FakeSession(Arc<std::sync::atomic::AtomicBool>);
+    impl NativeSession for FakeSession {
+        fn cancel(&self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    impl NativeDrop for FakeNative {
+        fn begin(&self, drag: u32, staged: Arc<Staged>, ended: Ended) -> Result<Box<dyn NativeSession>, String> {
+            let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            self.0.lock().unwrap().push((drag, staged, Some(ended), cancelled.clone()));
+            Ok(Box::new(FakeSession(cancelled)))
+        }
+    }
+    impl FakeNative {
+        fn staged(&self) -> Arc<Staged> {
+            self.0.lock().unwrap().last().expect("a system drag began").1.clone()
+        }
+        fn end(&self, took: bool) {
+            let ended = self.0.lock().unwrap().last_mut().expect("a system drag began").2.take().expect("ended once");
+            ended(took);
+        }
+        fn cancelled(&self) -> bool {
+            self.0.lock().unwrap().last().expect("a system drag began").3.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    /// A pump receiving `drag` of one 10-byte file into a system drag; the report comes back on `ends`.
+    fn native_pump(t: &Tmp) -> (DragPump, FakeNative, Receiver<(u32, bool)>) {
+        let fake = FakeNative::default();
+        let mut pump = DragPump::new(t.sub("staging"), t.sub("dest")).with_native(Arc::new(fake.clone()));
+        let (tx, ends) = channel();
+        let tx = Mutex::new(tx);
+        pump.report = Some(Arc::new(move |d, took| {
+            let _ = tx.lock().unwrap().send((d, took));
+        }));
+        let noop = |_m: Msg| true;
+        pump.on_msg(Msg::DragSoon { drag: 1 }, &noop);
+        pump.on_msg(Msg::DragBegin { drag: 1, files: vec![FileMeta { name: "a.txt".into(), size: 10 }] }, &noop);
+        (pump, fake, ends)
+    }
+
+    /// The target takes the file while it is still arriving: it waits for the rest, gets all of it where it asked,
+    /// and nothing lands in Downloads.
+    #[test]
+    fn native_target_takes_a_file_still_arriving() {
+        let t = Tmp::new("native-take");
+        let (mut pump, fake, ends) = native_pump(&t);
+        let noop = |_m: Msg| true;
+        pump.on_msg(Msg::FileChunk { drag: 1, file: 0, data: b"01234".to_vec() }, &noop);
+        let staged = fake.staged();
+        let to = t.sub("target").join("a.txt");
+        let to2 = to.clone();
+        let (took_tx, taken) = channel();
+        std::thread::spawn(move || took_tx.send(staged.deliver(0, &to2)));
+        assert!(taken.recv_timeout(Duration::from_millis(100)).is_err(), "the target waits for the rest of the file");
+        fake.end(true);
+        let (d, took) = ends.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(pump.on_native_end(d, took, &noop).is_empty());
+        pump.on_msg(Msg::FileChunk { drag: 1, file: 0, data: b"56789".to_vec() }, &noop);
+        assert_eq!(taken.recv_timeout(Duration::from_secs(2)), Ok(Ok(())));
+        assert_eq!(fs::read(&to).unwrap(), b"0123456789");
+        assert!(entries(&t.0.join("dest")).is_empty(), "nothing in Downloads");
+        assert!(pump.incoming.is_none(), "the drag is finished");
+    }
+
+    /// Ended over nothing that takes files: the files land in Downloads, as a plain release would have done.
+    #[test]
+    fn native_drag_over_nothing_saves_to_downloads() {
+        let t = Tmp::new("native-none");
+        let (mut pump, fake, ends) = native_pump(&t);
+        let noop = |_m: Msg| true;
+        pump.on_msg(Msg::FileChunk { drag: 1, file: 0, data: b"0123456789".to_vec() }, &noop);
+        fake.end(false);
+        let (d, took) = ends.recv_timeout(Duration::from_secs(2)).unwrap();
+        let landed = pump.on_native_end(d, took, &noop);
+        assert_eq!(landed, vec![t.0.join("dest/a.txt")]);
+        assert_eq!(fs::read(t.0.join("dest/a.txt")).unwrap(), b"0123456789");
+    }
+
+    /// The release on this machine is the system drag's own drop: it must not also save to Downloads.
+    #[test]
+    fn native_drag_owns_the_release() {
+        let t = Tmp::new("native-up");
+        let (mut pump, _fake, _ends) = native_pump(&t);
+        let noop = |_m: Msg| true;
+        pump.on_msg(Msg::FileChunk { drag: 1, file: 0, data: b"0123456789".to_vec() }, &noop);
+        assert!(pump.on_primary_up(&noop).is_empty());
+        assert!(entries(&t.0.join("dest")).is_empty());
+    }
+
+    /// Carried back over the edge: the system drag is cancelled, the sender is told, and a target still waiting
+    /// for the file is let go with an error instead of waiting forever.
+    #[test]
+    fn native_drag_carried_back_is_cancelled_and_frees_the_target() {
+        let t = Tmp::new("native-back");
+        let (mut pump, fake, _ends) = native_pump(&t);
+        let sent = Mutex::new(Vec::new());
+        let send = |m: Msg| { sent.lock().unwrap().push(m); true };
+        pump.on_msg(Msg::FileChunk { drag: 1, file: 0, data: b"01234".to_vec() }, &send);
+        let staged = fake.staged();
+        let to = t.sub("target").join("a.txt");
+        let (took_tx, taken) = channel();
+        std::thread::spawn(move || took_tx.send(staged.deliver(0, &to)));
+        std::thread::sleep(Duration::from_millis(50));
+        pump.on_cross_away(&send);
+        assert!(fake.cancelled());
+        assert!(sent.lock().unwrap().contains(&Msg::DragCancel { drag: 1 }));
+        assert!(taken.recv_timeout(Duration::from_secs(2)).expect("the waiting target is let go").is_err());
+        // A late report of the cancelled drag changes nothing.
+        assert!(pump.on_native_end(1, true, &send).is_empty());
+    }
+
+    /// A reader of a virtual file (Windows) gets the bytes as they arrive, and all of them.
+    #[test]
+    fn native_reader_follows_the_file_as_it_grows() {
+        let t = Tmp::new("native-read");
+        let (mut pump, fake, _ends) = native_pump(&t);
+        let noop = |_m: Msg| true;
+        let staged = fake.staged();
+        pump.on_msg(Msg::FileChunk { drag: 1, file: 0, data: b"01234".to_vec() }, &noop);
+        let (read_tx, read) = channel();
+        std::thread::spawn(move || {
+            let _ = read_tx.send(staged.wait_past(0, 0));
+            let _ = read_tx.send(staged.wait_past(0, 5));
+        });
+        assert_eq!(read.recv_timeout(Duration::from_secs(2)), Ok(Ok(5)), "what has arrived is readable at once");
+        assert!(read.recv_timeout(Duration::from_millis(50)).is_err(), "waits for bytes not yet here");
+        pump.on_msg(Msg::FileChunk { drag: 1, file: 0, data: b"56789".to_vec() }, &noop);
+        assert_eq!(read.recv_timeout(Duration::from_secs(2)), Ok(Ok(10)));
+    }
+
+    /// Through the hub: the end is reported from the OS's thread and handled on the hub's, in order.
+    #[test]
+    fn native_end_from_another_thread_is_handled_by_the_hub() {
+        let t = Tmp::new("native-hub");
+        let fake = FakeNative::default();
+        let mut hub = DragHub::new(None);
+        let pump = Arc::new(Mutex::new(DragPump::new(t.sub("staging"), t.sub("dest")).with_native(Arc::new(fake.clone()))));
+        hub.attach("peer", pump, Arc::new(|_| true));
+        let inbox = hub.inbox("peer").unwrap();
+        inbox.deliver(Msg::DragSoon { drag: 4 });
+        inbox.deliver(Msg::DragBegin { drag: 4, files: vec![FileMeta { name: "b.txt".into(), size: 3 }] });
+        inbox.deliver(Msg::FileChunk { drag: 4, file: 0, data: b"abc".to_vec() });
+        assert!(hub.flush(Duration::from_secs(2)));
+        let f = fake.clone();
+        std::thread::spawn(move || f.end(false)).join().unwrap();
+        assert!(hub.flush(Duration::from_secs(2)));
+        assert_eq!(fs::read(t.0.join("dest/b.txt")).unwrap(), b"abc");
     }
 
     /// Two pumps joined back to back, as two ends of a link: chunks and acks flow through threads.
@@ -1070,7 +1685,7 @@ mod tests {
                 aa.lock().unwrap().on_msg(m, &*sab);
             }
         });
-        a.lock().unwrap().start(&[src.join("movie.mov")], send_ab.clone());
+        a.lock().unwrap().start(1, &[src.join("movie.mov")], send_ab.clone());
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while std::time::Instant::now() < deadline && !entries(&sb).iter().any(|_| true) {
             std::thread::sleep(Duration::from_millis(10));
@@ -1085,7 +1700,7 @@ mod tests {
         assert_eq!(fs::read(db.join("movie.mov")).unwrap(), data, "landed {landed:?}");
         // A second drag that comes back before the drop: staged data is deleted, nothing lands.
         fs::write(src.join("second.txt"), b"second").unwrap();
-        a.lock().unwrap().start(&[src.join("second.txt")], send_ab.clone());
+        a.lock().unwrap().start(2, &[src.join("second.txt")], send_ab.clone());
         std::thread::sleep(Duration::from_millis(300));
         b.lock().unwrap().on_cross_away(&*send_ba);
         std::thread::sleep(Duration::from_millis(100));

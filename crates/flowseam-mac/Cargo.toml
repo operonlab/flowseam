@@ -1,6 +1,7 @@
 [package]
 name = "flowseam-mac"
-version = "0.1.0"
+version = "0.1.1"
+license = "MIT"
 edition = "2021"
 
 [dependencies]
@@ -8,3 +9,12 @@ flowseam-core = { path = "../flowseam-core" }
 flowseam-net = { path = "../flowseam-net" }
 # Already in the tree through getrandom; used for statvfs, whose struct differs per macOS arch.
 libc = "0.2"
+
+# objc2 refuses to compile for other targets, and the crate's pure-logic modules must build everywhere.
+[target.'cfg(target_os = "macos")'.dependencies]
+# The native drop's AppKit classes (a dragging source and a file-promise delegate). Already in the tree through
+# eframe/winit, at these versions.
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-core-foundation", "NSArray", "NSDictionary", "NSEnumerator", "NSError", "NSGeometry", "NSObject", "NSOperation", "NSString", "NSURL", "NSValue"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "libc", "objc2-core-foundation", "NSApplication", "NSColor", "NSDragging", "NSDraggingItem", "NSDraggingSession", "NSEvent", "NSFilePromiseProvider", "NSGraphics", "NSGraphicsContext", "NSImage", "NSPasteboard", "NSResponder", "NSRunningApplication", "NSScreen", "NSView", "NSWindow", "NSWorkspace"] }

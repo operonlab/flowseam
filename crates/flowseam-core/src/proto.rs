@@ -6,8 +6,10 @@
 
 use serde::{Deserialize, Serialize};
 
-/// 2: file drags (`DragBegin`, `FileChunk`, `DragAck`, `DragCancel`).
-pub const PROTO_VERSION: u16 = 2;
+/// 2: file drags (`DragBegin`, `FileChunk`, `DragAck`, `DragCancel`). 3: `DragSoon`.
+pub const PROTO_VERSION: u16 = 4;
+pub const MIN_PROTO_VERSION: u16 = 3;
+pub const MAX_PATH_ADDRS: usize = 16;
 pub const MAX_NAME_BYTES: usize = 64;
 pub const MAX_DISPLAYS: usize = 16;
 pub const MAX_CLIPBOARD_BYTES: usize = 1024 * 1024;
@@ -22,6 +24,28 @@ pub const MAX_PAIR_BYTES: usize = 256;
 /// HID keyboard usages are carried as `u16`, but the local key set is a 256-bit
 /// bitset (design §6), so anything at or above this is rejected on the wire.
 pub const HID_LIMIT: u16 = 256;
+
+/// What carries a path at one end. Ordered best first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Kind {
+    Wired,
+    Other,
+    WiFi,
+}
+impl Kind {
+    pub fn rank(self) -> u8 {
+        match self {
+            Self::Wired => 0,
+            Self::Other => 1,
+            Self::WiFi => 2,
+        }
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PathAddr {
+    pub addr: std::net::SocketAddr,
+    pub kind: Kind,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Point {
@@ -72,6 +96,8 @@ pub enum Reason {
     Shutdown,
     TopologyChange,
     UserEscape,
+    /// The recipient of an `Enter` is driving or being driven by another machine and cannot take it.
+    Busy,
 }
 
 /// One file of a drag: its bare name (no directories) and exact length.
@@ -163,6 +189,11 @@ pub enum Msg {
     PairConfirm {
         mac: Vec<u8>,
     },
+    /// Sent at the moment a file drag crosses, before any later input from the sender: `DragBegin` for
+    /// this drag follows. A release the recipient sees in between is the drop.
+    DragSoon {
+        drag: u32,
+    },
     /// A file drag crossed from the sender to the recipient. The files follow at once as `FileChunk`s,
     /// before any drop, so they are ready when the recipient sees the primary button released.
     DragBegin {
@@ -184,6 +215,10 @@ pub enum Msg {
     /// Either side abandons the drag; the recipient deletes what it staged.
     DragCancel {
         drag: u32,
+    },
+    Paths {
+        kind: Kind,
+        addrs: Vec<PathAddr>,
     },
 }
 
@@ -244,6 +279,9 @@ pub fn validate(m: &Msg) -> Result<(), ProtoError> {
             } else {
                 Ok(())
             }
+        }
+        Msg::Paths { addrs, .. } if addrs.len() > MAX_PATH_ADDRS => {
+            Err(ProtoError::Invalid("more than 16 path addresses"))
         }
         _ => Ok(()),
     }
@@ -329,6 +367,14 @@ mod tests {
             Msg::FileChunk { drag: 7, file: 1, data: vec![0xAB; 3] },
             Msg::DragAck { drag: 7, bytes: u64::MAX },
             Msg::DragCancel { drag: u32::MAX },
+            Msg::DragSoon { drag: 9 },
+            Msg::Paths {
+                kind: Kind::Wired,
+                addrs: vec![PathAddr {
+                    addr: "127.0.0.1:42".parse().unwrap(),
+                    kind: Kind::WiFi,
+                }],
+            },
         ]
     }
 
@@ -337,7 +383,7 @@ mod tests {
         let all = fixtures();
         // Exhaustive match: adding a variant without a fixture fails to compile
         // or leaves its index unseen below.
-        let mut seen = [false; 21];
+        let mut seen = [false; 23];
         for m in &all {
             let i = match m {
                 Msg::Hello { .. } => 0,
@@ -361,10 +407,12 @@ mod tests {
                 Msg::FileChunk { .. } => 18,
                 Msg::DragAck { .. } => 19,
                 Msg::DragCancel { .. } => 20,
+                Msg::DragSoon { .. } => 21,
+                Msg::Paths { .. } => 22,
             };
             seen[i] = true;
         }
-        assert!(seen.iter().all(|&s| s), "every one of the 21 variants needs a fixture");
+        assert!(seen.iter().all(|&s| s), "every one of the 23 variants needs a fixture");
         for m in all {
             let bytes = encode(&m).expect("encode");
             let back = decode(&bytes).expect("decode");
@@ -418,6 +466,48 @@ mod tests {
             displays: vec![Rect { x: 0, y: 0, w: 0, h: 10 }],
         };
         assert!(encode(&empty).is_err());
+    }
+
+    #[test]
+    fn paths_count_limit() {
+        let addr = PathAddr {
+            addr: "127.0.0.1:42".parse().unwrap(),
+            kind: Kind::Other,
+        };
+        let sixteen = Msg::Paths {
+            kind: Kind::Wired,
+            addrs: vec![addr; 16],
+        };
+        assert_eq!(decode(&encode(&sixteen).unwrap()).unwrap(), sixteen);
+        let seventeen = Msg::Paths {
+            kind: Kind::Wired,
+            addrs: vec![addr; 17],
+        };
+        assert!(encode(&seventeen).is_err());
+        assert!(decode(&postcard::to_allocvec(&seventeen).unwrap()).is_err());
+    }
+
+    #[test]
+    fn v3_golden_bytes() {
+        assert_eq!(
+            encode(&Msg::Hello {
+                ver: 3,
+                node: [1; 16],
+                name: "a".into(),
+                displays: vec![]
+            })
+            .unwrap(),
+            [0, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 97, 0]
+        );
+        assert_eq!(
+            encode(&Msg::MotionRel {
+                seq: 1,
+                dx: 2,
+                dy: -3
+            })
+            .unwrap(),
+            [4, 1, 4, 5]
+        );
     }
 
     #[test]

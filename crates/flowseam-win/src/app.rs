@@ -7,7 +7,7 @@
 use std::net::{SocketAddr, TcpListener, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -15,8 +15,9 @@ use flowseam_core::config::{Config, Edge, KeyMap, Peer};
 use flowseam_core::forward::{Forwarder, FwdConfig, Mode, PeerSpec};
 use flowseam_core::proto::{self, Msg, Rect};
 use flowseam_core::switch::SwitchPolicy;
+use flowseam_core::status::{self, LinkStatus};
 use flowseam_net::backoff::Backoff;
-use flowseam_net::files::{DragHub, DragPump, SendFn};
+use flowseam_net::files::{DragHub, DragInbox, DragPump, SendFn};
 use flowseam_net::identity::{from_hex, to_hex, Identity};
 use flowseam_net::link::{self, Endpoint};
 use flowseam_net::pair::{self, PairGuard};
@@ -35,6 +36,22 @@ const DISPLAY_REFRESH: Duration = Duration::from_secs(2);
 /// The forwarder's name for the one peer a session talks to. A session is one link, so the name only
 /// has to be the same on every call; which configured peer it is does not matter for receiving.
 const SESSION_PEER: &str = "peer";
+static ROUTER_HEARTBEAT: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+
+fn route_heartbeat(value: Option<Instant>) {
+    *ROUTER_HEARTBEAT.get_or_init(|| Mutex::new(None)).lock().unwrap_or_else(|e| e.into_inner()) = value;
+}
+
+fn status_heartbeat(config: &Path) {
+    let path = status::status_path(config);
+    thread::spawn(move || loop {
+        let active = *ROUTER_HEARTBEAT.get_or_init(|| Mutex::new(None)).lock().unwrap_or_else(|e| e.into_inner());
+        if active.is_none_or(|at| at.elapsed() <= Duration::from_secs(5)) {
+            if let Err(e) = status::write(&path, &LinkStatus { written_ms: status::now_ms(), peers: Vec::new() }) { log(&format!("status write: {e}")); }
+        }
+        thread::sleep(Duration::from_secs(1));
+    });
+}
 
 /// Builds a clipboard on the thread that will use it (Win32 windows are thread-bound).
 pub type ClipFactory<'a> = &'a (dyn Fn() -> Result<Box<dyn Clipboard>, String> + Sync);
@@ -51,7 +68,7 @@ pub struct Host<'a> {
 }
 
 pub fn log(msg: &str) {
-    eprintln!("[flowseam-win] {msg}");
+    flowseam_core::log::line(&format!("[flowseam-win] {msg}"));
 }
 
 pub fn identity_dir(config: &Path) -> PathBuf {
@@ -102,23 +119,24 @@ fn fwd_config(cfg: &Config) -> Result<FwdConfig, String> {
 
 /// Print the code, wait for one successful pairing, store the client's fingerprint.
 pub fn pair_serve(config: &Path, peer: &str, peer_addr: &str) -> Result<(), String> {
+    pair_serve_with(config, peer, peer_addr, |code| println!("PAIR CODE: {code}"), |fp| println!("PAIRED {peer} {fp}"))
+}
+
+/// Serve one pairing: `on_code` gets the code to show before a client is accepted, `on_paired` the
+/// stored fingerprint (hex). The CLI prints both; the GUI shows them.
+pub fn pair_serve_with(config: &Path, peer: &str, peer_addr: &str, on_code: impl FnOnce(&str), on_paired: impl FnOnce(&str)) -> Result<(), String> {
     let mut cfg = load(config)?;
     let listener = TcpListener::bind(&cfg.listen).map_err(|e| format!("bind {}: {e}", cfg.listen))?;
     let code = pair::generate_code();
-    println!("PAIR CODE: {code}");
+    on_code(&code);
     log(&format!("waiting for a client on {}", cfg.listen));
     let guard = PairGuard::default();
-    let fp = loop {
-        match pair::pair_as_server(&listener, &code, &identity_dir(config), &guard) {
-            Ok(fp) => break fp,
-            Err(e @ NetError::Pair(_)) => log(&format!("rejected: {e}")),
-            Err(e) if e.is_transient() => log(&format!("attempt dropped: {e}")),
-            Err(e) => return Err(e.to_string()),
-        }
-    };
+    let fp = pair::serve_code(&listener, &code, &identity_dir(config), &guard, || false, log)
+        .map_err(|e| e.to_string())?
+        .expect("serve_code returns None only when stop() is true");
     upsert_peer(&mut cfg, peer, peer_addr, Edge::Left, &fp);
     cfg.save(config).map_err(|e| e.to_string())?;
-    println!("PAIRED {peer} {}", to_hex(&fp));
+    on_paired(&to_hex(&fp));
     Ok(())
 }
 
@@ -138,8 +156,6 @@ fn pins_of(cfg: &Config) -> PinSet {
 }
 
 type WinForwarder = Forwarder<InjectSink<Box<dyn Injector>>, ChanOut>;
-/// This session's drag pump and how it sends to the peer.
-type SessionDrags = (Arc<Mutex<DragPump>>, SendFn);
 
 /// Unfinished files wait in %LOCALAPPDATA%\Flowseam\drags; dropped ones land in Downloads. `None` when
 /// the environment names no user profile.
@@ -150,8 +166,8 @@ fn drag_dirs() -> Option<(PathBuf, PathBuf)> {
     Some((local.join("Flowseam").join("drags"), home.join("Downloads")))
 }
 
-/// A drag hub for one session's one peer, and the pump the router feeds.
-fn session_drags(out: &Sender<Msg>, dirs: Option<(PathBuf, PathBuf)>) -> Option<(Arc<Mutex<DragHub>>, SessionDrags)> {
+/// A drag hub for one session's one peer, and the queue the router hands drag messages to.
+fn session_drags(out: &Sender<Msg>, dirs: Option<(PathBuf, PathBuf)>) -> Option<(Arc<Mutex<DragHub>>, DragInbox)> {
     let Some((staging, dest)) = dirs else {
         log("no user profile in the environment: file drags are off");
         return None;
@@ -164,8 +180,9 @@ fn session_drags(out: &Sender<Msg>, dirs: Option<(PathBuf, PathBuf)>) -> Option<
     let send: SendFn = Arc::new(move |m| tx.send(m).is_ok());
     // ponytail: no drag source on Windows yet, so drags only arrive here; reading an OLE drag needs a drop-target window.
     let mut hub = DragHub::new(None);
-    hub.attach(SESSION_PEER, pump.clone(), send.clone());
-    Some((Arc::new(Mutex::new(hub)), (pump, send)))
+    hub.attach(SESSION_PEER, pump, send);
+    let inbox = hub.inbox(SESSION_PEER).expect("just attached");
+    Some((Arc::new(Mutex::new(hub)), inbox))
 }
 
 /// Run `link` for exactly one session with a fresh clipboard pump and a fresh forwarder. Fresh per
@@ -201,7 +218,8 @@ fn with_session<R>(host: &Host<'_>, fwd_cfg: &FwdConfig, link: impl FnOnce(&Rece
 
 /// Clipboard to the pump, input to the forwarder; tick the forwarder so the return dwell fires while the
 /// mouse rests at the edge. When the session ends, release everything the peer was holding down here.
-fn route(incoming: Receiver<Msg>, clip: Sender<Msg>, mut fwd: WinForwarder, displays: DisplaySource<'_>, drags: Option<SessionDrags>) {
+fn route(incoming: Receiver<Msg>, clip: Sender<Msg>, mut fwd: WinForwarder, displays: DisplaySource<'_>, drags: Option<DragInbox>) {
+    route_heartbeat(Some(Instant::now()));
     let started = Instant::now();
     let now = || started.elapsed().as_millis() as u64;
     let mut refreshed = Instant::now();
@@ -211,11 +229,10 @@ fn route(incoming: Receiver<Msg>, clip: Sender<Msg>, mut fwd: WinForwarder, disp
             Ok(m @ Msg::ClipboardText { .. }) => {
                 let _ = clip.send(m);
             }
-            Ok(m @ (Msg::DragBegin { .. } | Msg::FileChunk { .. } | Msg::DragAck { .. } | Msg::DragCancel { .. })) => {
-                if let Some((pump, send)) = &drags {
-                    for p in pump.lock().unwrap_or_else(|e| e.into_inner()).on_msg(m, &**send) {
-                        log(&format!("saved {}", p.display()));
-                    }
+            Ok(m @ (Msg::DragSoon { .. } | Msg::DragBegin { .. } | Msg::FileChunk { .. } | Msg::DragAck { .. } | Msg::DragCancel { .. })) => {
+                // In order with the button releases this session injects, which reach the same queue.
+                if let Some(inbox) = &drags {
+                    inbox.deliver(m);
                 }
             }
             Ok(m) => fwd.on_msg(SESSION_PEER, m, now()),
@@ -223,6 +240,7 @@ fn route(incoming: Receiver<Msg>, clip: Sender<Msg>, mut fwd: WinForwarder, disp
             Err(RecvTimeoutError::Disconnected) => break,
         }
         fwd.tick(now());
+        route_heartbeat(Some(Instant::now()));
         if driven != matches!(fwd.mode(), Mode::RemoteIn { .. }) {
             log(if driven { "control returned to the peer" } else { "peer took control" });
         }
@@ -241,6 +259,7 @@ fn route(incoming: Receiver<Msg>, clip: Sender<Msg>, mut fwd: WinForwarder, disp
         log("session ended while driven: releasing held keys and buttons");
     }
     fwd.link_down(SESSION_PEER);
+    route_heartbeat(None);
 }
 
 /// One session or connection attempt ended. Nothing here ends the process: a stray LAN connection with
@@ -268,12 +287,12 @@ pub fn run_dial(config: &Path, host: &Host<'_>) -> Result<(), String> {
     let addr = resolve(&peer.addr)?;
     let id = Identity::load_or_create(&identity_dir(config)).map_err(|e| e.to_string())?;
     let (pins, me) = (pins_of(&cfg), node_info(&id, (host.displays)()?));
-    let ep = Endpoint { identity: &id, pins: &pins, me: &me, timing: Timing::default() };
+    let ep = Endpoint { identity: &id, pins: &pins, me: &me, timing: Timing::default(), speak_for: None, paths_for: None };
     let mut backoff = Backoff::new(Duration::from_secs(1), Duration::from_secs(30));
     loop {
         log(&format!("dialing {} ({addr})", peer.name));
         let r = with_session(host, &fwd_cfg, |out, inc| {
-            link::run_client_once_with(addr, &ep, out, inc, &|p| log(&format!("link up with {}", p.name)))
+            link::run_client_once_with(addr, &ep, out, inc, &|p| log(&format!("link up with {}", p.peer.name)))
         })?;
         report(&r, &mut backoff);
         thread::sleep(backoff.next_delay());
@@ -288,12 +307,13 @@ pub fn run_serve(config: &Path, host: &Host<'_>) -> Result<(), String> {
     let listener = TcpListener::bind(&cfg.listen).map_err(|e| format!("bind {}: {e}", cfg.listen))?;
     let id = Identity::load_or_create(&identity_dir(config)).map_err(|e| e.to_string())?;
     let (pins, me) = (pins_of(&cfg), node_info(&id, (host.displays)()?));
-    let ep = Endpoint { identity: &id, pins: &pins, me: &me, timing: Timing::default() };
+    let ep = Endpoint { identity: &id, pins: &pins, me: &me, timing: Timing::default(), speak_for: None, paths_for: None };
+    status_heartbeat(config);
     let mut backoff = Backoff::new(Duration::from_millis(200), Duration::from_secs(5));
     log(&format!("listening on {}", cfg.listen));
     loop {
         let r = with_session(host, &fwd_cfg, |out, inc| {
-            link::serve_once_with(&listener, &ep, out, inc, &|p| log(&format!("link up with {}", p.name)))
+            link::serve_once_with(&listener, &ep, out, inc, &|p| log(&format!("link up with {}", p.peer.name)))
         })?;
         report(&r, &mut backoff);
         thread::sleep(backoff.next_delay());
@@ -405,6 +425,7 @@ mod tests {
             let (staging, dest) = (root.join("staging"), root.join("Downloads"));
             std::fs::create_dir_all(&dest).unwrap();
             let r = rig_with(Some((staging, dest.clone())));
+            r.to_router.send(Msg::DragSoon { drag: 1 }).unwrap();
             r.to_router.send(Msg::DragBegin { drag: 1, files: vec![proto::FileMeta { name: "報告.pdf".into(), size: 5 }] }).unwrap();
             r.to_router.send(Msg::FileChunk { drag: 1, file: 0, data: b"%PDF-".to_vec() }).unwrap();
             r.to_router.send(enter(1)).unwrap();

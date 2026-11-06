@@ -99,11 +99,11 @@ fn normal_link_refuses_everyone_while_pin_sets_are_empty() {
     let (c_in_tx, _c_in_rx) = channel::<Msg>();
     let (sid, cid) = (s_id.clone(), c_id.clone());
     let server = thread::spawn(move || {
-        let ep = Endpoint { identity: &sid, pins: &PinSet::default(), me: &s_info, timing };
+        let ep = Endpoint { identity: &sid, pins: &PinSet::default(), me: &s_info, timing, speak_for: None, paths_for: None };
         link::serve_once(&listener, &ep, &s_out_rx, &s_in_tx)
     });
     let client = thread::spawn(move || {
-        let ep = Endpoint { identity: &cid, pins: &PinSet::default(), me: &c_info, timing };
+        let ep = Endpoint { identity: &cid, pins: &PinSet::default(), me: &c_info, timing, speak_for: None, paths_for: None };
         link::run_client_once(addr, &ep, &c_out_rx, &c_in_tx)
     });
     let c = client.join().unwrap();

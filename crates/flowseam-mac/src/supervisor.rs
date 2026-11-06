@@ -4,8 +4,9 @@
 //! so this is the only thing that can undo a hide it left behind.
 //!
 //! Pipe protocol: the worker writes [`CLEAN`] right before a normal exit, after
-//! its own restore. EOF without that marker means the worker died (crash,
-//! SIGKILL, OOM) and the cursor may still be hidden.
+//! its own restore, or [`QUIT`] instead when the system asked it to quit. EOF
+//! without either marker means the worker died (crash, SIGKILL, OOM) and the
+//! cursor may still be hidden.
 
 use crate::grab::{remove_lock, CursorOs};
 use flowseam_core::backend::BackendError;
@@ -13,11 +14,16 @@ use std::io::Read;
 use std::path::Path;
 
 pub const CLEAN: &[u8] = b"CLEAN";
+/// A clean end the system asked for: a quit Apple event sent to the app (a script, a quit-all tool). The worker
+/// shares the app's bundle ID, so the event can reach it instead of the window; the window should quit too.
+pub const QUIT: &[u8] = b"QUIT";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkerEnd {
     /// The worker wrote the clean marker and restored its own cursor.
     Clean,
+    /// Clean as well, but the system asked the app to quit.
+    Quit,
     /// EOF without the marker, or the pipe read failed. Treated as a death.
     Died,
 }
@@ -26,9 +32,13 @@ pub enum WorkerEnd {
 pub fn await_worker(mut pipe: impl Read) -> WorkerEnd {
     let mut buf = Vec::new();
     match pipe.read_to_end(&mut buf) {
-        // The worker writes `CLEAN\n`; one trailing newline is part of the marker.
-        Ok(_) if buf.strip_suffix(b"\n").unwrap_or(&buf) == CLEAN => WorkerEnd::Clean,
-        _ => WorkerEnd::Died,
+        // The worker writes `CLEAN\n` or `QUIT\n`; one trailing newline is part of the marker.
+        Ok(_) => match buf.strip_suffix(b"\n").unwrap_or(&buf) {
+            m if m == CLEAN => WorkerEnd::Clean,
+            m if m == QUIT => WorkerEnd::Quit,
+            _ => WorkerEnd::Died,
+        },
+        Err(_) => WorkerEnd::Died,
     }
 }
 
@@ -107,6 +117,17 @@ mod tests {
         assert!(log.calls().is_empty(), "no OS call expected on clean exit: {:?}", log.calls());
     }
 
+    #[test]
+    fn quit_marker_is_clean_and_does_not_restore_again() {
+        let (mut mock, log) = os(false);
+        let lock = lock_for("quit");
+        let (r, mut w) = std::io::pipe().unwrap();
+        w.write_all(b"QUIT\n").unwrap();
+        drop(w);
+        assert_eq!(supervise(r, &mut mock, &lock).unwrap(), WorkerEnd::Quit);
+        assert!(log.calls().is_empty(), "the worker restored its own cursor: {:?}", log.calls());
+    }
+
     /// A failed restore keeps the lock file so startup recovery can retry, and reports the error.
     #[test]
     fn failed_restore_keeps_lock_for_recovery() {
@@ -148,7 +169,13 @@ mod tests {
     /// The worker writes `CLEAN\n`; that is the same clean end, but two newlines are not.
     #[test]
     fn clean_marker_with_one_trailing_newline_is_clean() {
-        for (payload, want) in [(&b"CLEAN\n"[..], WorkerEnd::Clean), (&b"CLEAN\n\n"[..], WorkerEnd::Died)] {
+        for (payload, want) in [
+            (&b"CLEAN\n"[..], WorkerEnd::Clean),
+            (&b"CLEAN\n\n"[..], WorkerEnd::Died),
+            (&b"QUIT\n"[..], WorkerEnd::Quit),
+            (&b"QUIT"[..], WorkerEnd::Quit),
+            (&b"QUITS\n"[..], WorkerEnd::Died),
+        ] {
             let (r, mut w) = std::io::pipe().unwrap();
             w.write_all(payload).unwrap();
             drop(w);

@@ -39,7 +39,14 @@ for t in aarch64-apple-darwin x86_64-apple-darwin; do
 done
 
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+cp "$ROOT/assets/icon/AppIcon.icns" "$APP/Contents/Resources/" || fail "no assets/icon/AppIcon.icns"
+# The dependencies' licenses ship inside the app. about.toml lists the accepted ones; any other fails the build.
+ABOUT=$(command -v cargo-about) || fail "cargo-about is needed for the license notices: cargo install cargo-about --locked --features cli"
+if ! (cd "$ROOT" && "$ABOUT" about generate about.hbs -o "$APP/Contents/Resources/THIRD-PARTY-NOTICES.html") > "$TARGET_DIR/about.log" 2>&1; then
+  tail -20 "$TARGET_DIR/about.log" >&2
+  fail "license notices failed (log: $TARGET_DIR/about.log)"
+fi
 lipo -create -output "$APP/Contents/MacOS/flowseam" \
   "$TARGET_DIR/aarch64-apple-darwin/release/flowseam" \
   "$TARGET_DIR/x86_64-apple-darwin/release/flowseam" || fail "lipo failed"
@@ -52,6 +59,7 @@ cat > "$APP/Contents/Info.plist" <<EOF
   <key>CFBundleName</key><string>Flowseam</string>
   <key>CFBundleDisplayName</key><string>Flowseam</string>
   <key>CFBundleExecutable</key><string>flowseam</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$VER</string>
   <key>CFBundleVersion</key><string>$VER</string>

@@ -76,12 +76,12 @@ fn pinned_handshake_then_hello_and_data_both_ways() {
 
     let (sid, spins, sinfo) = (server_id.clone(), server_pins, server_info.clone());
     let server = thread::spawn(move || {
-        let ep = Endpoint { identity: &sid, pins: &spins, me: &sinfo, timing: timing() };
+        let ep = Endpoint { identity: &sid, pins: &spins, me: &sinfo, timing: timing(), speak_for: None, paths_for: None };
         link::serve_once(&listener, &ep, &s_out_rx, &s_in_tx)
     });
     let (cid, cpins, cinfo) = (client_id.clone(), client_pins, client_info.clone());
     let client = thread::spawn(move || {
-        let ep = Endpoint { identity: &cid, pins: &cpins, me: &cinfo, timing: timing() };
+        let ep = Endpoint { identity: &cid, pins: &cpins, me: &cinfo, timing: timing(), speak_for: None, paths_for: None };
         link::run_client_once(addr, &ep, &c_out_rx, &c_in_tx)
     });
 
@@ -123,7 +123,7 @@ fn client_refuses_a_server_whose_fingerprint_is_not_pinned() {
     let (s_in_tx, _s_in_rx) = channel::<Msg>();
     let (sid, sinfo) = (server_id.clone(), server_info.clone());
     let server = thread::spawn(move || {
-        let ep = Endpoint { identity: &sid, pins: &server_pins, me: &sinfo, timing: timing() };
+        let ep = Endpoint { identity: &sid, pins: &server_pins, me: &sinfo, timing: timing(), speak_for: None, paths_for: None };
         link::serve_once(&listener, &ep, &s_out_rx, &s_in_tx)
     });
 
@@ -133,7 +133,7 @@ fn client_refuses_a_server_whose_fingerprint_is_not_pinned() {
     // stays healthy on heartbeats, and the test must fail rather than hang.
     let (cid, cpins, cinfo) = (client_id.clone(), client_pins, client_info.clone());
     let client = thread::spawn(move || {
-        let ep = Endpoint { identity: &cid, pins: &cpins, me: &cinfo, timing: timing() };
+        let ep = Endpoint { identity: &cid, pins: &cpins, me: &cinfo, timing: timing(), speak_for: None, paths_for: None };
         link::run_client_once(addr, &ep, &c_out_rx, &c_in_tx)
     });
     let err = join_within(client, 10).expect_err("must refuse");
@@ -161,7 +161,7 @@ fn server_refuses_a_client_whose_fingerprint_is_not_pinned() {
     let (s_in_tx, _s_in_rx) = channel::<Msg>();
     let (sid, sinfo) = (server_id.clone(), server_info.clone());
     let server = thread::spawn(move || {
-        let ep = Endpoint { identity: &sid, pins: &server_pins, me: &sinfo, timing: timing() };
+        let ep = Endpoint { identity: &sid, pins: &server_pins, me: &sinfo, timing: timing(), speak_for: None, paths_for: None };
         link::serve_once(&listener, &ep, &s_out_rx, &s_in_tx)
     });
 
@@ -169,7 +169,7 @@ fn server_refuses_a_client_whose_fingerprint_is_not_pinned() {
     let (c_in_tx, _c_in_rx) = channel::<Msg>();
     let (cid, cpins, cinfo) = (client_id.clone(), client_pins, client_info.clone());
     let client = thread::spawn(move || {
-        let ep = Endpoint { identity: &cid, pins: &cpins, me: &cinfo, timing: timing() };
+        let ep = Endpoint { identity: &cid, pins: &cpins, me: &cinfo, timing: timing(), speak_for: None, paths_for: None };
         link::run_client_once(addr, &ep, &c_out_rx, &c_in_tx)
     });
     // TLS 1.3 lets the client finish before the server checks its certificate,
@@ -209,14 +209,14 @@ fn forged_node_hello(server_forges: bool) -> (Result<Outcome, NetError>, Result<
     let (s_in_tx, _s_in_rx) = channel::<Msg>();
     let (sid, sinfo, sup) = (server_id.clone(), server_info, server_up.clone());
     let server = thread::spawn(move || {
-        let ep = Endpoint { identity: &sid, pins: &server_pins, me: &sinfo, timing: timing() };
+        let ep = Endpoint { identity: &sid, pins: &server_pins, me: &sinfo, timing: timing(), speak_for: None, paths_for: None };
         link::serve_once_with(&listener, &ep, &s_out_rx, &s_in_tx, &|_| sup.store(true, Ordering::SeqCst))
     });
     let (c_out_tx, c_out_rx) = channel::<Msg>();
     let (c_in_tx, _c_in_rx) = channel::<Msg>();
     let (cid, cinfo, cup) = (client_id.clone(), client_info, client_up.clone());
     let client = thread::spawn(move || {
-        let ep = Endpoint { identity: &cid, pins: &client_pins, me: &cinfo, timing: timing() };
+        let ep = Endpoint { identity: &cid, pins: &client_pins, me: &cinfo, timing: timing(), speak_for: None, paths_for: None };
         link::run_client_once_with(addr, &ep, &c_out_rx, &c_in_tx, &|_| cup.store(true, Ordering::SeqCst))
     });
     // A session that wrongly came up would run on heartbeats; end it so the joins return.
@@ -258,7 +258,7 @@ fn reconnects_after_the_peer_drops_the_link() {
     let stop = Arc::new(AtomicBool::new(false));
     let (cid, cpins, cinfo, stop_c) = (client_id.clone(), client_pins, client_info.clone(), stop.clone());
     let client = thread::spawn(move || {
-        let ep = Endpoint { identity: &cid, pins: &cpins, me: &cinfo, timing: timing() };
+        let ep = Endpoint { identity: &cid, pins: &cpins, me: &cinfo, timing: timing(), speak_for: None, paths_for: None };
         let mut backoff = Backoff::new(Duration::from_millis(20), Duration::from_millis(200));
         link::run_client(addr, &ep, &c_out_rx, &c_in_tx, &mut backoff, &stop_c)
     });
@@ -277,7 +277,7 @@ fn reconnects_after_the_peer_drops_the_link() {
 
     // Server, connection 1: complete Hello, then close at once (outgoing
     // sender dropped) so the client sees the link go away.
-    let ep = Endpoint { identity: &server_id, pins: &server_pins, me: &server_info, timing: timing() };
+    let ep = Endpoint { identity: &server_id, pins: &server_pins, me: &server_info, timing: timing(), speak_for: None, paths_for: None };
     let (dead_tx, dead_rx) = channel::<Msg>();
     drop(dead_tx);
     let (in1_tx, _in1_rx) = channel::<Msg>();
@@ -289,7 +289,7 @@ fn reconnects_after_the_peer_drops_the_link() {
     let (keep_tx, keep_rx) = channel::<Msg>();
     let (in2_tx, in2_rx) = channel::<Msg>();
     let server2 = thread::spawn(move || {
-        let ep = Endpoint { identity: &server_id, pins: &server_pins, me: &server_info, timing: timing() };
+        let ep = Endpoint { identity: &server_id, pins: &server_pins, me: &server_info, timing: timing(), speak_for: None, paths_for: None };
         link::serve_once(&listener, &ep, &keep_rx, &in2_tx)
     });
     let got = in2_rx.recv_timeout(Duration::from_secs(10));

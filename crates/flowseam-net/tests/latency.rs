@@ -47,12 +47,12 @@ fn input_on_an_idle_link_arrives_without_waiting_for_the_read_timeout() {
 
     let (sid, spins) = (server_id.clone(), server_pins);
     let server = thread::spawn(move || {
-        let ep = Endpoint { identity: &sid, pins: &spins, me: &sinfo, timing: timing() };
+        let ep = Endpoint { identity: &sid, pins: &spins, me: &sinfo, timing: timing(), speak_for: None, paths_for: None };
         link::serve_once(&listener, &ep, &s_out_rx, &s_in_tx)
     });
     let (cid, cpins) = (client_id.clone(), client_pins);
     let client = thread::spawn(move || {
-        let ep = Endpoint { identity: &cid, pins: &cpins, me: &cinfo, timing: timing() };
+        let ep = Endpoint { identity: &cid, pins: &cpins, me: &cinfo, timing: timing(), speak_for: None, paths_for: None };
         link::run_client_once(addr, &ep, &c_out_rx, &c_in_tx)
     });
 

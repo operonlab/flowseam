@@ -108,12 +108,12 @@ fn a_switches_out_b_injects_then_b_returns_the_cursor() {
 
     let (id, pins, me) = (b_id.clone(), b_pins, b_info);
     let server = thread::spawn(move || {
-        let ep = Endpoint { identity: &id, pins: &pins, me: &me, timing: timing() };
+        let ep = Endpoint { identity: &id, pins: &pins, me: &me, timing: timing(), speak_for: None, paths_for: None };
         link::serve_once(&listener, &ep, &b_out_rx, &b_in_tx)
     });
     let (id, pins, me) = (a_id.clone(), a_pins, a_info);
     let client = thread::spawn(move || {
-        let ep = Endpoint { identity: &id, pins: &pins, me: &me, timing: timing() };
+        let ep = Endpoint { identity: &id, pins: &pins, me: &me, timing: timing(), speak_for: None, paths_for: None };
         link::run_client_once(addr, &ep, &a_out_rx, &a_in_tx)
     });
 

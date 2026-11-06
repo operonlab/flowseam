@@ -317,12 +317,39 @@ pub fn aux_key(subtype: i16, data1: i64) -> Option<(u16, bool)> {
     Some((hid, down))
 }
 
+/// The NX key type a media-key usage is posted as on a Mac receiving it: the inverse of [`aux_key`]. macOS changes
+/// the volume (and plays, skips) only on these system-defined events; the same usages posted as ordinary key presses
+/// (`kVK_VolumeUp` and so on) do nothing.
+pub fn nx_key_for(hid: u16) -> Option<i64> {
+    match hid {
+        0x80 => Some(0),            // NX_KEYTYPE_SOUND_UP
+        0x81 => Some(1),            // NX_KEYTYPE_SOUND_DOWN
+        0x7F => Some(7),            // NX_KEYTYPE_MUTE
+        HID_PLAY_PAUSE => Some(16), // NX_KEYTYPE_PLAY
+        HID_NEXT => Some(17),       // NX_KEYTYPE_NEXT
+        HID_PREVIOUS => Some(18),   // NX_KEYTYPE_PREVIOUS
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod aux_tests {
     use super::*;
 
     fn ev(key: i64, state: i64) -> i64 {
         (key << 16) | (state << 8)
+    }
+
+    /// A media key a peer sends is posted back as the same system-defined key it was read from, down and up:
+    /// volume, mute and the transport keys survive the round trip, so a Mac receiving them acts on them.
+    #[test]
+    fn media_keys_post_as_the_key_type_they_were_read_from() {
+        for hid in [0x80, 0x81, 0x7F, HID_PLAY_PAUSE, HID_NEXT, HID_PREVIOUS] {
+            let nx = nx_key_for(hid).unwrap_or_else(|| panic!("{hid:#x} has no system-defined key"));
+            assert_eq!(aux_key(8, ev(nx, 0x0A)), Some((hid, true)), "{hid:#x} down");
+            assert_eq!(aux_key(8, ev(nx, 0x0B)), Some((hid, false)), "{hid:#x} up");
+        }
+        assert_eq!(nx_key_for(0x04), None, "an ordinary key stays an ordinary key");
     }
 
     #[test]

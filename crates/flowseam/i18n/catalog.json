@@ -1,0 +1,1017 @@
+{
+  " 毫秒": {
+    "en": " ms",
+    "ja": " ミリ秒",
+    "ko": " 밀리초"
+  },
+  "Flowseam": {
+    "en": "Flowseam",
+    "ja": "Flowseam",
+    "ko": "Flowseam"
+  },
+  "Flowseam {} 的新功能": {
+    "en": "What's New in Flowseam {}",
+    "ja": "Flowseam {} の新機能",
+    "ko": "Flowseam {}의 새로운 기능"
+  },
+  "Flowseam 不會自行連網。請到版本頁查看是否有新版本。": {
+    "en": "Flowseam never goes online by itself. Check the releases page for a newer version.",
+    "ja": "Flowseam が自分でネットに接続することはありません。新しいバージョンはリリースページで確認してください。",
+    "ko": "Flowseam은 스스로 인터넷에 연결하지 않습니다. 새 버전은 릴리스 페이지에서 확인하세요."
+  },
+  "Flowseam 的新功能": {
+    "en": "What's New in Flowseam",
+    "ja": "Flowseam の新機能",
+    "ko": "Flowseam의 새로운 기능"
+  },
+  "Mac 也能顯示配對碼": {
+    "en": "A Mac can show a pairing code too",
+    "ja": "Mac でもペアリングコードを表示",
+    "ko": "Mac에서도 페어링 코드 표시"
+  },
+  "Mac 快捷鍵": {
+    "en": "Mac shortcuts",
+    "ja": "Macのショートカット",
+    "ko": "Mac 단축키"
+  },
+  "Mac 的游標移過來時，就由 Mac 操作這台電腦。": {
+    "en": "Move the Mac pointer here to control this computer.",
+    "ja": "Macのポインタを移動すると、このコンピュータを操作できます。",
+    "ko": "Mac 포인터를 이쪽으로 옮기면 이 컴퓨터를 제어할 수 있습니다."
+  },
+  "Mac 的選單列和 Windows 的系統匣會顯示共用是否開啟、連著哪幾台。關掉視窗後 Flowseam 仍會繼續執行。": {
+    "en": "The Mac menu bar and the Windows tray show whether sharing is on and which computers are connected. Closing the window keeps Flowseam running.",
+    "ja": "Mac のメニューバーと Windows のタスクトレイに、共有のオン・オフと接続中のコンピュータが表示されます。ウインドウを閉じても Flowseam は動き続けます。",
+    "ko": "Mac 메뉴 막대와 Windows 트레이에 공유가 켜져 있는지, 어떤 컴퓨터가 연결되어 있는지 표시됩니다. 창을 닫아도 Flowseam은 계속 실행됩니다."
+  },
+  "Mac 鍵盤的按鍵到對方怎麼解讀": {
+    "en": "How the other computer interprets Mac keys",
+    "ja": "相手のコンピュータでのMacキーの扱い",
+    "ko": "상대 컴퓨터에서 Mac 키를 해석하는 방식"
+  },
+  "chord {} 含空的片段": {
+    "en": "Shortcut {} has an empty part",
+    "ja": "ショートカット{}に空の部分があります",
+    "ko": "단축키 {}에 빈 부분이 있습니다"
+  },
+  "chord {} 最後一段必須是按鍵，不是修飾鍵": {
+    "en": "The last part of shortcut {} must be a key, not a modifier",
+    "ja": "ショートカット{}の最後は修飾キーではなくキーにしてください",
+    "ko": "단축키 {}의 마지막 부분은 보조 키가 아닌 일반 키여야 합니다"
+  },
+  "chord {} 的 {} 不是修飾鍵（{}）": {
+    "en": "{}: {} is not a modifier ({})",
+    "ja": "{}: {}は修飾キーではありません（{}）",
+    "ko": "{}: {}은(는) 보조 키가 아닙니다({})"
+  },
+  "chord {} 的 {} 重複": {
+    "en": "{} repeats modifier {}",
+    "ja": "{}で修飾キー{}が重複しています",
+    "ko": "{}에 보조 키 {}이(가) 중복되었습니다"
+  },
+  "chord {} 至少要一個修飾鍵（{}）": {
+    "en": "Shortcut {} needs at least one modifier ({})",
+    "ja": "ショートカット{}には修飾キーが1つ以上必要です（{}）",
+    "ko": "단축키 {}에는 보조 키가 하나 이상 필요합니다({})"
+  },
+  "worker 已停止，{} 秒後自動重新啟動": {
+    "en": "Sharing stopped. Restarting automatically in {} s",
+    "ja": "共有が停止しました。{} 秒後に自動で再起動します",
+    "ko": "공유가 중지되었습니다. {}초 후 자동으로 다시 시작합니다"
+  },
+  "{} 毫秒": {
+    "en": "{} ms",
+    "ja": "{}ミリ秒",
+    "ko": "{}밀리초"
+  },
+  "{}權限查不到：{}": {
+    "en": "Could not check {} permission: {}",
+    "ja": "{}の権限を確認できません：{}",
+    "ko": "{} 권한을 확인할 수 없습니다: {}"
+  },
+  "{}缺權限：{}": {
+    "en": "{} permission required: {}",
+    "ja": "{}の権限が必要です：{}",
+    "ko": "{} 권한이 필요합니다: {}"
+  },
+  "{}：{}": {
+    "en": "{}: {}",
+    "ja": "{}：{}",
+    "ko": "{}: {}"
+  },
+  "上": {
+    "en": "Top",
+    "ja": "上",
+    "ko": "위"
+  },
+  "下": {
+    "en": "Bottom",
+    "ja": "下",
+    "ko": "아래"
+  },
+  "不轉換": {
+    "en": "No remapping",
+    "ja": "変換しない",
+    "ko": "변환 안 함"
+  },
+  "不轉換（對方也是 Mac）": {
+    "en": "No remapping (other computer is a Mac)",
+    "ja": "変換しない（相手もMac）",
+    "ko": "변환 안 함(상대도 Mac)"
+  },
+  "介面支援 English、繁體中文、日本語、한국어，預設跟隨系統語言，可在「進階 › 語言」更改。": {
+    "en": "Flowseam speaks English, 繁體中文, 日本語 and 한국어. It follows the system language; change it in Advanced › Language.",
+    "ja": "English、繁體中文、日本語、한국어 に対応しました。システムの言語に従い、「詳細 › 言語」で変更できます。",
+    "ko": "English, 繁體中文, 日本語, 한국어를 지원합니다. 시스템 언어를 따르며 고급 › 언어에서 바꿀 수 있습니다."
+  },
+  "位址": {
+    "en": "Address",
+    "ja": "アドレス",
+    "ko": "주소"
+  },
+  "位置": {
+    "en": "Position",
+    "ja": "位置",
+    "ko": "위치"
+  },
+  "依 Mac 快捷鍵（⌘C 複製、⌘Tab 切換、單按 ⌥ 開始）": {
+    "en": "Mac shortcuts (⌘C copy, ⌘Tab switch, tap ⌥ for Start)",
+    "ja": "Macのショートカット（⌘Cでコピー、⌘Tabで切り替え、⌥でスタート）",
+    "ko": "Mac 단축키(⌘C 복사, ⌘Tab 전환, ⌥ 시작)"
+  },
+  "依鍵盤位置": {
+    "en": "By key position",
+    "ja": "キーの位置に合わせる",
+    "ko": "키 위치 기준"
+  },
+  "依鍵盤位置（⌥=Win、⌘=Alt）": {
+    "en": "By key position (⌥=Win, ⌘=Alt)",
+    "ja": "キーの位置に合わせる（⌥=Win、⌘=Alt）",
+    "ko": "키 위치 기준(⌥=Win, ⌘=Alt)"
+  },
+  "停止中…": {
+    "en": "Stopping…",
+    "ja": "停止中…",
+    "ko": "중지 중…"
+  },
+  "停留切換": {
+    "en": "Dwell to switch",
+    "ja": "端で停止して切り替え",
+    "ko": "가장자리에 머물러 전환"
+  },
+  "停留在邊界": {
+    "en": "Dwell at edge",
+    "ja": "画面の端で停止",
+    "ko": "화면 가장자리에 머무르기"
+  },
+  "停留時間": {
+    "en": "Dwell time",
+    "ja": "停止時間",
+    "ko": "머무는 시간"
+  },
+  "儲存": {
+    "en": "Save",
+    "ja": "保存",
+    "ko": "저장"
+  },
+  "儲存失敗": {
+    "en": "Could not save",
+    "ja": "保存できませんでした",
+    "ko": "저장하지 못했습니다"
+  },
+  "兩台 Mac 之間有多條連線時，優先使用 Thunderbolt 或有線網路。": {
+    "en": "When two Macs have more than one way to connect, Thunderbolt or wired networking is used first.",
+    "ja": "2 台の Mac の間に複数の接続がある場合は、Thunderbolt や有線ネットワークを優先します。",
+    "ko": "두 Mac 사이에 여러 연결이 있을 때 Thunderbolt나 유선 네트워크를 먼저 사용합니다."
+  },
+  "兩台 Mac 現在可以直接在 App 裡配對。": {
+    "en": "Two Macs can now be paired from the app.",
+    "ja": "2 台の Mac をアプリ内でペアリングできるようになりました。",
+    "ko": "이제 두 Mac을 앱에서 바로 페어링할 수 있습니다."
+  },
+  "共用中": {
+    "en": "Sharing",
+    "ja": "共有中",
+    "ko": "공유 중"
+  },
+  "共用未開": {
+    "en": "Sharing off",
+    "ja": "共有オフ",
+    "ko": "공유 꺼짐"
+  },
+  "共用鍵盤與滑鼠": {
+    "en": "Share keyboard and mouse",
+    "ja": "キーボードとマウスを共有",
+    "ko": "키보드와 마우스 공유"
+  },
+  "切到另一台電腦時，音量和播放鍵也會送到對方。": {
+    "en": "While you control another computer, volume and playback keys go to it too.",
+    "ja": "別のコンピュータを操作中は、音量や再生キーもそちらに送られます。",
+    "ko": "다른 컴퓨터를 제어하는 동안 음량과 재생 키도 그쪽으로 전달됩니다."
+  },
+  "切換方式": {
+    "en": "Switching",
+    "ja": "切り替え方法",
+    "ko": "전환 방식"
+  },
+  "到「系統設定 › 隱私權與安全性」允許 Flowseam，完成後按「重新檢查」。": {
+    "en": "Allow Flowseam in System Settings › Privacy & Security, then select Check Again.",
+    "ja": "「システム設定」›「プライバシーとセキュリティ」でFlowseamを許可し、「再確認」を選択してください。",
+    "ko": "시스템 설정 › 개인정보 보호 및 보안에서 Flowseam을 허용한 다음 다시 확인을 선택하세요."
+  },
+  "到「裝置與邊界」新增。": {
+    "en": "Add one in Devices & Edges.",
+    "ja": "「デバイスと画面の端」で追加してください。",
+    "ko": "기기 및 가장자리에서 추가하세요."
+  },
+  "取消": {
+    "en": "Cancel",
+    "ja": "キャンセル",
+    "ko": "취소"
+  },
+  "另一台畫面上的 6 位數字": {
+    "en": "6-digit code shown on the other computer",
+    "ja": "相手の画面に表示された6桁のコード",
+    "ko": "상대 컴퓨터에 표시된 6자리 코드"
+  },
+  "另一台的 IP 與連接埠": {
+    "en": "Other computer’s IP address and port",
+    "ja": "相手のIPアドレスとポート",
+    "ko": "상대 컴퓨터의 IP 주소와 포트"
+  },
+  "可用 Homebrew 安裝：": {
+    "en": "Install with Homebrew:",
+    "ja": "Homebrew でインストール：",
+    "ko": "Homebrew로 설치:"
+  },
+  "右": {
+    "en": "Right",
+    "ja": "右",
+    "ko": "오른쪽"
+  },
+  "四種語言": {
+    "en": "Four languages",
+    "ja": "4 つの言語",
+    "ko": "4개 언어"
+  },
+  "在 Finder 中顯示": {
+    "en": "Show in Finder",
+    "ja": "Finderに表示",
+    "ko": "Finder에서 보기"
+  },
+  "在 Mac 上直接放進資料夾": {
+    "en": "Drop into folders on a Mac",
+    "ja": "Mac ではフォルダへ直接ドロップ",
+    "ko": "Mac에서는 폴더에 바로 놓기"
+  },
+  "在{}側": {
+    "en": "On the {} side",
+    "ja": "{}側",
+    "ko": "{}쪽"
+  },
+  "在{}側 · {}": {
+    "en": "On the {} side · {}",
+    "ja": "{}側 · {}",
+    "ko": "{}쪽 · {}"
+  },
+  "在另一台電腦開啟配對：Windows 會顯示 6 位數字；兩台 Mac 配對時，請其中一台按「顯示配對碼」。": {
+    "en": "Open Pairing on the other computer. A Windows PC shows a 6-digit code; to pair two Macs, choose Show Pairing Code on one of them.",
+    "ja": "もう一方のコンピュータでペアリングを開きます。Windows には 6 桁のコードが表示されます。Mac 同士をペアリングするときは、どちらか一方で「ペアリングコードを表示」を選びます。",
+    "ko": "다른 컴퓨터에서 페어링을 엽니다. Windows에는 6자리 코드가 표시됩니다. Mac 두 대를 페어링하려면 한쪽에서 '페어링 코드 표시'를 선택하세요."
+  },
+  "在檔案總管中顯示": {
+    "en": "Show in File Explorer",
+    "ja": "エクスプローラーに表示",
+    "ko": "파일 탐색기에서 보기"
+  },
+  "執行檔路徑不是有效的文字": {
+    "en": "The app's path is not valid text",
+    "ja": "アプリのパスが有効な文字列ではありません",
+    "ko": "앱 경로가 올바른 텍스트가 아닙니다"
+  },
+  "執行檔路徑含有無法引用的引號": {
+    "en": "The app's path contains a quote that cannot be escaped",
+    "ja": "アプリのパスに扱えない引用符が含まれています",
+    "ko": "앱 경로에 처리할 수 없는 따옴표가 있습니다"
+  },
+  "它在這台螢幕的哪一側": {
+    "en": "Which side of this display it is on",
+    "ja": "この画面のどちら側にあるか",
+    "ko": "이 화면의 어느 쪽에 있는지"
+  },
+  "完成": {
+    "en": "Done",
+    "ja": "完了",
+    "ko": "완료"
+  },
+  "完整更新紀錄": {
+    "en": "Full Changelog",
+    "ja": "すべての変更履歴",
+    "ko": "전체 변경 기록"
+  },
+  "對方拒絕：{}": {
+    "en": "Refused by the other computer: {}",
+    "ja": "相手に拒否されました：{}",
+    "ko": "상대 컴퓨터가 거부했습니다: {}"
+  },
+  "對方沒有回應（程式可能卡住）": {
+    "en": "No response (the other app may be stuck)",
+    "ja": "応答がありません（相手のアプリが固まっている可能性があります）",
+    "ko": "응답이 없습니다(상대 앱이 멈췄을 수 있음)"
+  },
+  "對方沒有開啟 Flowseam": {
+    "en": "Flowseam isn't open on the other computer",
+    "ja": "相手のコンピュータで Flowseam が開いていません",
+    "ko": "상대 컴퓨터에서 Flowseam이 열려 있지 않습니다"
+  },
+  "尚未儲存，請先修正下方標示的問題": {
+    "en": "Not saved. Resolve the issues below first.",
+    "ja": "保存されていません。下の問題を修正してください。",
+    "ko": "저장하지 않았습니다. 아래 문제를 먼저 해결하세요."
+  },
+  "尚未加入任何裝置": {
+    "en": "No devices added",
+    "ja": "デバイスがありません",
+    "ko": "추가된 기기 없음"
+  },
+  "尚未配對：{}（先到配對頁完成，或移除該裝置）": {
+    "en": "Not paired: {} (pair it first or remove it)",
+    "ja": "未ペアリング：{}（ペアリングするか削除してください）",
+    "ko": "페어링되지 않음: {}(페어링하거나 제거하세요)"
+  },
+  "左": {
+    "en": "Left",
+    "ja": "左",
+    "ko": "왼쪽"
+  },
+  "已中斷": {
+    "en": "Disconnected",
+    "ja": "接続が切れました",
+    "ko": "연결 끊김"
+  },
+  "已儲存": {
+    "en": "Saved",
+    "ja": "保存しました",
+    "ko": "저장됨"
+  },
+  "已儲存，正在重新啟動分享以套用…": {
+    "en": "Saved. Restarting sharing to apply changes…",
+    "ja": "保存しました。変更を適用するため共有を再起動しています…",
+    "ko": "저장했습니다. 변경 사항을 적용하기 위해 공유를 다시 시작하는 중…"
+  },
+  "已取消配對": {
+    "en": "Pairing cancelled.",
+    "ja": "ペアリングをキャンセルしました。",
+    "ko": "페어링을 취소했습니다."
+  },
+  "已套用新設定": {
+    "en": "New settings applied",
+    "ja": "新しい設定を適用しました",
+    "ko": "새 설정 적용됨"
+  },
+  "已自動重新啟動": {
+    "en": "Restarted automatically",
+    "ja": "自動的に再起動しました",
+    "ko": "자동으로 다시 시작됨"
+  },
+  "已配對": {
+    "en": "Paired",
+    "ja": "ペアリング済み",
+    "ko": "페어링됨"
+  },
+  "已配對 · {}": {
+    "en": "Paired · {}",
+    "ja": "ペアリング済み · {}",
+    "ko": "페어링됨 · {}"
+  },
+  "快捷鍵": {
+    "en": "Shortcut",
+    "ja": "ショートカット",
+    "ko": "단축키"
+  },
+  "快捷鍵切換": {
+    "en": "Switch with shortcut",
+    "ja": "ショートカットで切り替え",
+    "ko": "단축키로 전환"
+  },
+  "恢復預設": {
+    "en": "Restore Defaults",
+    "ja": "デフォルトに戻す",
+    "ko": "기본값 복원"
+  },
+  "所有變更都已儲存": {
+    "en": "All changes saved",
+    "ja": "すべての変更を保存しました",
+    "ko": "모든 변경 사항 저장됨"
+  },
+  "打開版本頁": {
+    "en": "Open Releases Page",
+    "ja": "リリースページを開く",
+    "ko": "릴리스 페이지 열기"
+  },
+  "打開系統設定": {
+    "en": "Open System Settings",
+    "ja": "システム設定を開く",
+    "ko": "시스템 설정 열기"
+  },
+  "打開開關，這台電腦就會參與共用。": {
+    "en": "Turn on sharing to include this computer.",
+    "ja": "共有をオンにすると、このコンピュータが参加します。",
+    "ko": "공유를 켜면 이 컴퓨터가 참여합니다."
+  },
+  "找不到對方（不在網路上）": {
+    "en": "Can't find the other computer (not on the network)",
+    "ja": "相手が見つかりません（ネットワーク上にいません）",
+    "ko": "상대 컴퓨터를 찾을 수 없습니다(네트워크에 없음)"
+  },
+  "把檔案拖到 Mac 上，可以直接放進資料夾、桌面或 App。拖到 Windows 的檔案仍會存到「下載」。": {
+    "en": "A file dragged onto a Mac can go straight into a folder, the desktop or an app. A file dragged onto a Windows PC still goes to Downloads.",
+    "ja": "Mac にドラッグしたファイルは、フォルダ、デスクトップ、アプリにそのままドロップできます。Windows にドラッグしたファイルは、これまでどおり「ダウンロード」に保存されます。",
+    "ko": "Mac으로 끌어온 파일은 폴더, 데스크톱, 앱에 바로 놓을 수 있습니다. Windows로 끌어온 파일은 지금처럼 다운로드 폴더에 저장됩니다."
+  },
+  "拷貝": {
+    "en": "Copy",
+    "ja": "コピー",
+    "ko": "복사"
+  },
+  "按鍵對應": {
+    "en": "Key Mapping",
+    "ja": "キーの割り当て",
+    "ko": "키 매핑"
+  },
+  "接收位址": {
+    "en": "Listening Address",
+    "ja": "待ち受けアドレス",
+    "ko": "수신 주소"
+  },
+  "控制另一台電腦時，滑鼠快速移動不再掉步，速度和在本機一樣。": {
+    "en": "When you control another computer, fast pointer moves no longer lose steps, so it moves as fast as it does here.",
+    "ja": "別のコンピュータを操作中も、ポインタを速く動かしたときに動きが欠けず、手元と同じ速さで動きます。",
+    "ko": "다른 컴퓨터를 제어할 때 포인터를 빠르게 움직여도 끊기지 않고, 이 컴퓨터에서와 같은 속도로 움직입니다."
+  },
+  "換上新的水獺圖示。": {
+    "en": "Flowseam has a new otter icon.",
+    "ja": "新しいカワウソのアイコンになりました。",
+    "ko": "새 수달 아이콘으로 바뀌었습니다."
+  },
+  "擷取": {
+    "en": "Capture",
+    "ja": "入力の取得",
+    "ko": "입력 캡처"
+  },
+  "新圖示": {
+    "en": "New icon",
+    "ja": "新しいアイコン",
+    "ko": "새 아이콘"
+  },
+  "有尚未儲存的變更": {
+    "en": "Unsaved changes",
+    "ja": "未保存の変更があります",
+    "ko": "저장하지 않은 변경 사항"
+  },
+  "未共用": {
+    "en": "Not sharing",
+    "ja": "共有していません",
+    "ko": "공유 안 함"
+  },
+  "未從 Flowseam.app 啟動": {
+    "en": "Not running from Flowseam.app",
+    "ja": "Flowseam.app から起動されていません",
+    "ko": "Flowseam.app에서 실행되지 않았습니다"
+  },
+  "未知的登入項目狀態：{}": {
+    "en": "Unknown login item status: {}",
+    "ja": "不明なログイン項目の状態：{}",
+    "ko": "알 수 없는 로그인 항목 상태: {}"
+  },
+  "未連線": {
+    "en": "Not connected",
+    "ja": "未接続",
+    "ko": "연결 안 됨"
+  },
+  "未連線 · {}": {
+    "en": "Not connected · {}",
+    "ja": "未接続 · {}",
+    "ko": "연결 안 됨 · {}"
+  },
+  "未配對": {
+    "en": "Not paired",
+    "ja": "未ペアリング",
+    "ko": "페어링 안 됨"
+  },
+  "格式如 ctrl+alt+cmd+s": {
+    "en": "For example: ctrl+alt+cmd+s",
+    "ja": "例：ctrl+alt+cmd+s",
+    "ko": "예: ctrl+alt+cmd+s"
+  },
+  "檢查更新": {
+    "en": "Check for Updates",
+    "ja": "アップデートを確認",
+    "ko": "업데이트 확인"
+  },
+  "檢查更新…": {
+    "en": "Check for Updates…",
+    "ja": "アップデートを確認…",
+    "ko": "업데이트 확인…"
+  },
+  "正在把控制權還給這台電腦。": {
+    "en": "Returning control to this computer.",
+    "ja": "操作をこのコンピュータに戻しています。",
+    "ko": "제어권을 이 컴퓨터로 돌려주는 중입니다."
+  },
+  "正在準備配對…": {
+    "en": "Preparing pairing…",
+    "ja": "ペアリングを準備中…",
+    "ko": "페어링 준비 중…"
+  },
+  "每台已配對電腦的連線狀態現在看得見。": {
+    "en": "You can now see whether each paired computer is connected.",
+    "ja": "ペアリングした各コンピュータが接続中かどうかを確認できます。",
+    "ko": "페어링된 각 컴퓨터가 연결되어 있는지 확인할 수 있습니다."
+  },
+  "注入": {
+    "en": "Control",
+    "ja": "入力の送信",
+    "ko": "입력 전송"
+  },
+  "游標停住這麼久就切過去": {
+    "en": "Switch after the pointer rests this long",
+    "ja": "ポインタがこの時間止まると切り替えます",
+    "ko": "포인터가 이 시간 동안 멈추면 전환합니다"
+  },
+  "游標停在邊界多久才切過去": {
+    "en": "How long the pointer stays at the edge before switching",
+    "ja": "画面の端で停止してから切り替えるまでの時間",
+    "ko": "포인터가 가장자리에 머문 뒤 전환하기까지의 시간"
+  },
+  "滑鼠移到邊界停留，或按快捷鍵，即可切換到另一台。": {
+    "en": "Rest the pointer at an edge or use a shortcut to switch computers.",
+    "ja": "ポインタを画面の端で止めるか、ショートカットで切り替えます。",
+    "ko": "포인터를 화면 가장자리에 머물게 하거나 단축키로 전환하세요."
+  },
+  "滑鼠速度修正": {
+    "en": "Pointer speed fixed",
+    "ja": "ポインタ速度の修正",
+    "ko": "포인터 속도 수정"
+  },
+  "無法儲存語言偏好：{}": {
+    "en": "Could not save language preference: {}",
+    "ja": "言語設定を保存できません：{}",
+    "ko": "언어 설정을 저장할 수 없습니다: {}"
+  },
+  "無法取得 Flowseam 登入項目": {
+    "en": "Could not get Flowseam's login item",
+    "ja": "Flowseam のログイン項目を取得できません",
+    "ko": "Flowseam 로그인 항목을 가져올 수 없습니다"
+  },
+  "無法取得執行檔路徑：{}": {
+    "en": "Could not get the app's path: {}",
+    "ja": "アプリのパスを取得できません：{}",
+    "ko": "앱 경로를 가져올 수 없습니다: {}"
+  },
+  "無法啟動：{}": {
+    "en": "Could not start: {}",
+    "ja": "起動できません：{}",
+    "ko": "시작할 수 없습니다: {}"
+  },
+  "無法啟動：有裝置尚未配對": {
+    "en": "Could not start: a device is not paired",
+    "ja": "起動できません：未ペアリングのデバイスがあります",
+    "ko": "시작할 수 없습니다: 페어링되지 않은 기기가 있습니다"
+  },
+  "無法啟動：缺少權限，請到「系統設定 › 隱私權與安全性」打開 Flowseam": {
+    "en": "Could not start: allow Flowseam in System Settings › Privacy & Security",
+    "ja": "起動できません：「システム設定」›「プライバシーとセキュリティ」でFlowseamを許可してください",
+    "ko": "시작할 수 없습니다: 시스템 설정 › 개인정보 보호 및 보안에서 Flowseam을 허용하세요"
+  },
+  "無法完成操作：{}": {
+    "en": "Could not complete: {}",
+    "ja": "操作を完了できません：{}",
+    "ko": "작업을 완료할 수 없습니다: {}"
+  },
+  "無法確認登入項目：{}": {
+    "en": "Could not check the login item: {}",
+    "ja": "ログイン項目を確認できません：{}",
+    "ko": "로그인 항목을 확인할 수 없습니다: {}"
+  },
+  "無法記下共用狀態：{}": {
+    "en": "Could not save sharing state: {}",
+    "ja": "共有状態を保存できません：{}",
+    "ko": "공유 상태를 저장할 수 없습니다: {}"
+  },
+  "無法讀取登入項目：{}": {
+    "en": "Could not read the login item: {}",
+    "ja": "ログイン項目を読み取れません：{}",
+    "ko": "로그인 항목을 읽을 수 없습니다: {}"
+  },
+  "無法變更登入項目": {
+    "en": "Could not change the login item",
+    "ja": "ログイン項目を変更できません",
+    "ko": "로그인 항목을 변경할 수 없습니다"
+  },
+  "無法變更登入項目（錯誤代碼：{}）": {
+    "en": "Could not change the login item (error {})",
+    "ja": "ログイン項目を変更できません（エラー {}）",
+    "ko": "로그인 항목을 변경할 수 없습니다(오류 {})"
+  },
+  "無法變更登入項目：{}": {
+    "en": "Could not change the login item: {}",
+    "ja": "ログイン項目を変更できません：{}",
+    "ko": "로그인 항목을 변경할 수 없습니다: {}"
+  },
+  "無法連線：{}": {
+    "en": "Can't connect: {}",
+    "ja": "接続できません：{}",
+    "ko": "연결할 수 없습니다: {}"
+  },
+  "無法開啟登入項目設定：{}": {
+    "en": "Could not open Login Items settings: {}",
+    "ja": "ログイン項目の設定を開けません：{}",
+    "ko": "로그인 항목 설정을 열 수 없습니다: {}"
+  },
+  "無法開啟登入項目：{}": {
+    "en": "Could not open the login item: {}",
+    "ja": "ログイン項目を開けません：{}",
+    "ko": "로그인 항목을 열 수 없습니다: {}"
+  },
+  "版本 {}": {
+    "en": "Version {}",
+    "ja": "バージョン {}",
+    "ko": "버전 {}"
+  },
+  "版本不同，正在改用相容版本": {
+    "en": "Different versions; switching to a compatible one",
+    "ja": "バージョンが異なるため、互換バージョンに切り替えています",
+    "ko": "버전이 달라 호환 버전으로 전환하는 중입니다"
+  },
+  "狀態未知": {
+    "en": "Status unknown",
+    "ja": "状態不明",
+    "ko": "상태 알 수 없음"
+  },
+  "用 Homebrew 更新": {
+    "en": "Update with Homebrew",
+    "ja": "Homebrew でアップデート",
+    "ko": "Homebrew로 업데이트"
+  },
+  "登入時自動開啟": {
+    "en": "Open at Login",
+    "ja": "ログイン時に開く",
+    "ko": "로그인 시 열기"
+  },
+  "登入項目內容不是有效文字": {
+    "en": "The login item is not valid text",
+    "ja": "ログイン項目の内容が有効な文字列ではありません",
+    "ko": "로그인 항목 내용이 올바른 텍스트가 아닙니다"
+  },
+  "登入項目內容無效：{}": {
+    "en": "The login item is invalid: {}",
+    "ja": "ログイン項目の内容が無効です：{}",
+    "ko": "로그인 항목 내용이 잘못되었습니다: {}"
+  },
+  "登入項目指向另一個執行檔": {
+    "en": "The login item points to another copy of the app",
+    "ja": "ログイン項目が別のアプリを指しています",
+    "ko": "로그인 항목이 다른 앱을 가리킵니다"
+  },
+  "目前版本 {}": {
+    "en": "Current version {}",
+    "ja": "現在のバージョン {}",
+    "ko": "현재 버전 {}"
+  },
+  "移除這台裝置": {
+    "en": "Remove Device",
+    "ja": "このデバイスを削除",
+    "ko": "이 기기 제거"
+  },
+  "第一版": {
+    "en": "First release",
+    "ja": "最初のリリース",
+    "ko": "첫 릴리스"
+  },
+  "等待另一台電腦輸入配對碼…": {
+    "en": "Waiting for the other computer to enter the pairing code…",
+    "ja": "相手のコンピュータでペアリングコードが入力されるのを待っています…",
+    "ko": "상대 컴퓨터에서 페어링 코드를 입력하기를 기다리는 중…"
+  },
+  "組合鍵": {
+    "en": "Key Combination",
+    "ja": "キーの組み合わせ",
+    "ko": "키 조합"
+  },
+  "結束 Flowseam": {
+    "en": "Quit Flowseam",
+    "ja": "Flowseam を終了",
+    "ko": "Flowseam 종료"
+  },
+  "總覽": {
+    "en": "Overview",
+    "ja": "概要",
+    "ko": "개요"
+  },
+  "繼續": {
+    "en": "Continue",
+    "ja": "続ける",
+    "ko": "계속"
+  },
+  "自動挑最快的連線": {
+    "en": "The fastest connection, automatically",
+    "ja": "最速の接続を自動で選択",
+    "ko": "가장 빠른 연결을 자동 선택"
+  },
+  "裝置": {
+    "en": "Devices",
+    "ja": "デバイス",
+    "ko": "기기"
+  },
+  "裝置名稱": {
+    "en": "Device Name",
+    "ja": "デバイス名",
+    "ko": "기기 이름"
+  },
+  "裝置與邊界": {
+    "en": "Devices & Edges",
+    "ja": "デバイスと画面の端",
+    "ko": "기기 및 가장자리"
+  },
+  "設定…": {
+    "en": "Settings…",
+    "ja": "設定…",
+    "ko": "설정…"
+  },
+  "設定檔": {
+    "en": "Configuration File",
+    "ja": "設定ファイル",
+    "ko": "설정 파일"
+  },
+  "設定檔讀取失敗，改用預設（未覆寫檔案）：{}": {
+    "en": "Could not read configuration; using defaults without overwriting the file: {}",
+    "ja": "設定ファイルを読み込めません。ファイルを上書きせず、デフォルトを使用します：{}",
+    "ko": "설정 파일을 읽을 수 없어 파일을 덮어쓰지 않고 기본값을 사용합니다: {}"
+  },
+  "設定視窗顯示每台是否連線中": {
+    "en": "Settings shows who is connected",
+    "ja": "設定に各コンピュータの接続状態を表示",
+    "ko": "설정에서 각 컴퓨터의 연결 상태 표시"
+  },
+  "語言": {
+    "en": "Language",
+    "ja": "言語",
+    "ko": "언어"
+  },
+  "請先到「裝置與邊界」新增一台裝置": {
+    "en": "Add a device in Devices & Edges first",
+    "ja": "先に「デバイスと画面の端」で追加してください",
+    "ko": "먼저 기기 및 가장자리에서 기기를 추가하세요"
+  },
+  "請先到「裝置與邊界」新增裝置。": {
+    "en": "Add a device in Devices & Edges first.",
+    "ja": "先に「デバイスと画面の端」で追加してください。",
+    "ko": "먼저 기기 및 가장자리에서 기기를 추가하세요."
+  },
+  "請先到「裝置與邊界」新增要配對的 Mac": {
+    "en": "Add the Mac to pair in Devices & Edges first",
+    "ja": "先に「デバイスと画面の端」でペアリングするMacを追加してください",
+    "ko": "먼저 기기 및 가장자리에서 페어링할 Mac을 추가하세요"
+  },
+  "請先完成配對": {
+    "en": "Complete pairing first",
+    "ja": "先にペアリングを完了してください",
+    "ko": "먼저 페어링을 완료하세요"
+  },
+  "請先關閉共用（配對會用到同一個連接埠）": {
+    "en": "Turn off sharing first (pairing uses the same port)",
+    "ja": "先に共有をオフにしてください（ペアリングは同じポートを使用します）",
+    "ko": "먼저 공유를 끄세요(페어링에 같은 포트를 사용합니다)"
+  },
+  "貼邊多少像素內算在邊界上": {
+    "en": "Pixels from the edge counted as the boundary",
+    "ja": "画面の端から境界とみなすピクセル数",
+    "ko": "가장자리로 간주할 픽셀 범위"
+  },
+  "跟隨系統": {
+    "en": "Follow System",
+    "ja": "システム設定に従う",
+    "ko": "시스템 설정 따르기"
+  },
+  "這一版的更新內容": {
+    "en": "What's in this version",
+    "ja": "このバージョンの内容",
+    "ko": "이번 버전의 내용"
+  },
+  "這台 Mac": {
+    "en": "This Mac",
+    "ja": "このMac",
+    "ko": "이 Mac"
+  },
+  "這台 Windows": {
+    "en": "This Windows PC",
+    "ja": "このWindows PC",
+    "ko": "이 Windows PC"
+  },
+  "這台已經有另一個 Flowseam 在分享（可能是另一個視窗）": {
+    "en": "Flowseam is already sharing on this computer (possibly in another window)",
+    "ja": "このコンピュータでは別のFlowseamが共有中です（別のウインドウの可能性があります）",
+    "ko": "이 컴퓨터에서 다른 Flowseam이 이미 공유 중입니다(다른 창일 수 있음)"
+  },
+  "這台電腦監聽的位址，大多數情況保持預設": {
+    "en": "Address this computer listens on; usually leave the default",
+    "ja": "このコンピュータの待ち受けアドレス。通常はデフォルトのままにします",
+    "ko": "이 컴퓨터의 수신 주소입니다. 보통 기본값을 유지하세요"
+  },
+  "連線中": {
+    "en": "Connected",
+    "ja": "接続中",
+    "ko": "연결됨"
+  },
+  "連線中 · Wi‑Fi": {
+    "en": "Connected · Wi‑Fi",
+    "ja": "接続中 · Wi‑Fi",
+    "ko": "연결됨 · Wi‑Fi"
+  },
+  "連線中 · 有線": {
+    "en": "Connected · Wired",
+    "ja": "接続中 · 有線",
+    "ko": "연결됨 · 유선"
+  },
+  "連線中斷": {
+    "en": "Connection lost",
+    "ja": "接続が切れました",
+    "ko": "연결이 끊어졌습니다"
+  },
+  "連線逾時": {
+    "en": "Connection timed out",
+    "ja": "接続がタイムアウトしました",
+    "ko": "연결 시간이 초과되었습니다"
+  },
+  "進階": {
+    "en": "Advanced",
+    "ja": "詳細",
+    "ko": "고급"
+  },
+  "選單列與系統匣圖示": {
+    "en": "Menu bar and tray icon",
+    "ja": "メニューバーとタスクトレイのアイコン",
+    "ko": "메뉴 막대 및 트레이 아이콘"
+  },
+  "選擇對應的裝置，輸入數字後按「配對」。": {
+    "en": "Select the device, enter the code, then select Pair.",
+    "ja": "デバイスを選び、コードを入力して「ペアリング」を選択します。",
+    "ko": "기기를 선택하고 코드를 입력한 다음 페어링을 선택하세요."
+  },
+  "選擇要配對的 Mac。": {
+    "en": "Select the Mac to pair.",
+    "ja": "ペアリングするMacを選びます。",
+    "ko": "페어링할 Mac을 선택하세요."
+  },
+  "還沒有可配對的裝置": {
+    "en": "No devices available to pair",
+    "ja": "ペアリングできるデバイスがありません",
+    "ko": "페어링할 수 있는 기기 없음"
+  },
+  "邊界寬度": {
+    "en": "Edge Width",
+    "ja": "境界の幅",
+    "ko": "가장자리 너비"
+  },
+  "配對": {
+    "en": "Pairing",
+    "ja": "ペアリング",
+    "ko": "페어링"
+  },
+  "配對一次即可，之後自動信任。": {
+    "en": "Pair once; the device will be trusted afterward.",
+    "ja": "一度ペアリングすると、次回から自動的に信頼されます。",
+    "ko": "한 번 페어링하면 이후에는 자동으로 신뢰합니다."
+  },
+  "配對中…": {
+    "en": "Pairing…",
+    "ja": "ペアリング中…",
+    "ko": "페어링 중…"
+  },
+  "配對中，完成後才能移除": {
+    "en": "Finish pairing before removing",
+    "ja": "ペアリングが完了してから削除できます",
+    "ko": "페어링을 마친 후 제거할 수 있습니다"
+  },
+  "配對失敗：{}": {
+    "en": "Pairing failed: {}",
+    "ja": "ペアリングに失敗しました：{}",
+    "ko": "페어링 실패: {}"
+  },
+  "配對完成": {
+    "en": "Paired successfully",
+    "ja": "ペアリングしました",
+    "ko": "페어링 완료"
+  },
+  "配對完成，但找不到它是為哪台裝置開始的，請重新配對": {
+    "en": "Pairing finished, but the device could not be identified. Pair again.",
+    "ja": "ペアリングは完了しましたが、対象のデバイスを特定できません。もう一度ペアリングしてください。",
+    "ko": "페어링은 완료되었지만 대상 기기를 찾을 수 없습니다. 다시 페어링하세요."
+  },
+  "配對完成，請按「儲存」": {
+    "en": "Paired. Select Save.",
+    "ja": "ペアリングしました。「保存」を選択してください。",
+    "ko": "페어링 완료. 저장을 선택하세요."
+  },
+  "配對完成：指紋沒有變": {
+    "en": "Paired. The fingerprint has not changed.",
+    "ja": "ペアリングしました。フィンガープリントは変わっていません。",
+    "ko": "페어링했습니다. 지문은 바뀌지 않았습니다."
+  },
+  "配對期間位址從 {} 改成 {}，請重新配對": {
+    "en": "Address changed from {} to {} during pairing. Pair again.",
+    "ja": "ペアリング中にアドレスが{}から{}に変わりました。もう一度ペアリングしてください。",
+    "ko": "페어링 중 주소가 {}에서 {}(으)로 변경되었습니다. 다시 페어링하세요."
+  },
+  "配對期間這台裝置被移除了，請重新配對": {
+    "en": "Device removed during pairing. Pair again.",
+    "ja": "ペアリング中にデバイスが削除されました。もう一度ペアリングしてください。",
+    "ko": "페어링 중 기기가 제거되었습니다. 다시 페어링하세요."
+  },
+  "配對碼": {
+    "en": "Pairing Code",
+    "ja": "ペアリングコード",
+    "ko": "페어링 코드"
+  },
+  "配對碼是 6 位數字": {
+    "en": "Pairing code must be 6 digits",
+    "ja": "ペアリングコードは6桁の数字です",
+    "ko": "페어링 코드는 숫자 6자리여야 합니다"
+  },
+  "重新檢查": {
+    "en": "Check Again",
+    "ja": "再確認",
+    "ko": "다시 확인"
+  },
+  "重新計時距離": {
+    "en": "Reset Distance",
+    "ja": "停止時間をリセットする距離",
+    "ko": "머무는 시간 재설정 거리"
+  },
+  "鍵盤與滑鼠共用": {
+    "en": "Keyboard and Mouse Sharing",
+    "ja": "キーボードとマウスの共有",
+    "ko": "키보드 및 마우스 공유"
+  },
+  "開啟登入項目設定": {
+    "en": "Open Login Items Settings",
+    "ja": "ログイン項目の設定を開く",
+    "ko": "로그인 항목 설정 열기"
+  },
+  "開始在電腦之間共用鍵盤與滑鼠。": {
+    "en": "Share one keyboard and mouse between computers.",
+    "ja": "コンピュータ間でキーボードとマウスを共有できます。",
+    "ko": "여러 컴퓨터에서 키보드와 마우스 하나를 함께 사용할 수 있습니다."
+  },
+  "隨時切換到下一台": {
+    "en": "Switch to the next computer at any time",
+    "ja": "いつでも次のコンピュータに切り替えます",
+    "ko": "언제든 다음 컴퓨터로 전환합니다"
+  },
+  "隱藏 Flowseam": {
+    "en": "Hide Flowseam",
+    "ja": "Flowseam を隠す",
+    "ko": "Flowseam 가리기"
+  },
+  "離開邊界多遠才重新計時": {
+    "en": "Distance from the edge before timing resets",
+    "ja": "画面の端から離れると停止時間をリセットする距離",
+    "ko": "가장자리에서 벗어나면 머무는 시간을 재설정할 거리"
+  },
+  "需要在『系統設定 › 一般 › 登入項目』允許": {
+    "en": "Allow it in System Settings › General › Login Items",
+    "ja": "「システム設定 › 一般 › ログイン項目」で許可してください",
+    "ko": "'시스템 설정 › 일반 › 로그인 항목'에서 허용해야 합니다"
+  },
+  "需要系統權限": {
+    "en": "System Permission Required",
+    "ja": "システムの権限が必要です",
+    "ko": "시스템 권한 필요"
+  },
+  "音量等媒體鍵": {
+    "en": "Volume and media keys",
+    "ja": "音量などのメディアキー",
+    "ko": "음량 등 미디어 키"
+  },
+  "顯示配對碼": {
+    "en": "Show Pairing Code",
+    "ja": "ペアリングコードを表示",
+    "ko": "페어링 코드 표시"
+  },
+  "顯示配對碼，並在 Mac 上輸入。": {
+    "en": "Show the pairing code and enter it on the Mac.",
+    "ja": "ペアリングコードを表示し、Macで入力します。",
+    "ko": "페어링 코드를 표시하고 Mac에서 입력하세요."
+  },
+  "（未命名）": {
+    "en": "(Unnamed)",
+    "ja": "（名称未設定）",
+    "ko": "(이름 없음)"
+  },
+  "＋ 新增裝置": {
+    "en": "＋ Add Device",
+    "ja": "＋ デバイスを追加",
+    "ko": "＋ 기기 추가"
+  }
+}

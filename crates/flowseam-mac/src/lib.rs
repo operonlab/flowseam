@@ -18,7 +18,13 @@ pub mod switch_gate;
 #[cfg(target_os = "macos")]
 mod ffi;
 #[cfg(target_os = "macos")]
+mod heartbeat;
+#[cfg(target_os = "macos")]
+mod ifaces;
+#[cfg(target_os = "macos")]
 pub mod backend;
+#[cfg(target_os = "macos")]
+pub mod native;
 #[cfg(target_os = "macos")]
 pub mod sys;
 #[cfg(target_os = "macos")]

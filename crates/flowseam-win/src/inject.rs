@@ -8,6 +8,7 @@ use std::io::Write;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
+use flowseam_core::cursor::PostedCursor;
 use flowseam_core::forward::{InputSink, Outbox};
 use flowseam_core::proto::{Msg, Point, Rect};
 use flowseam_net::files::DragHub;
@@ -79,20 +80,7 @@ pub fn wire_button(b: u8) -> Option<WinButton> {
     }
 }
 
-/// `p` itself when a display holds it, else the nearest point on a display (edges included, no inset):
-/// pushing past the edge leaves the cursor on the edge, where the return strip is.
-pub fn clamp_to_displays(displays: &[Rect], p: Point) -> Point {
-    let mut best: Option<(i64, Point)> = None;
-    for r in displays {
-        let x = (p.x as i64).clamp(r.x as i64, r.x as i64 + r.w as i64 - 1);
-        let y = (p.y as i64).clamp(r.y as i64, r.y as i64 + r.h as i64 - 1);
-        let d = (x - p.x as i64).pow(2) + (y - p.y as i64).pow(2);
-        if best.is_none_or(|(bd, _)| d < bd) {
-            best = Some((d, Point { x: x as i32, y: y as i32 }));
-        }
-    }
-    best.map_or(p, |(_, q)| q)
-}
+pub use flowseam_core::geometry::clamp_to_displays;
 
 /// flowseam_core's sink for a machine being driven: everything a peer sends is injected through `I`.
 /// This machine never captures, so the controller-only calls (grab, hide, show) are reported as bugs.
@@ -106,11 +94,13 @@ pub struct InjectSink<I: Injector> {
     /// again too soon would toggle it back off.
     num_lock_sent: Option<std::time::Instant>,
     drags: Option<Arc<Mutex<DragHub>>>,
+    /// Where this sink last sent the cursor: the base for the next relative move (see flowseam_core::cursor).
+    posted: PostedCursor,
 }
 
 impl<I: Injector> InjectSink<I> {
     pub fn new(inj: I, displays: Vec<Rect>, log: fn(&str)) -> Self {
-        InjectSink { inj, displays, log, last_err: None, num_lock_sent: None, drags: None }
+        InjectSink { inj, displays, log, last_err: None, num_lock_sent: None, drags: None, posted: PostedCursor::default() }
     }
 
     /// File drags: presses and crossings go to `hub`.
@@ -121,6 +111,7 @@ impl<I: Injector> InjectSink<I> {
 
     pub fn set_displays(&mut self, d: Vec<Rect>) {
         self.displays = d;
+        self.posted.forget();
     }
 
     pub fn injector(&self) -> &I {
@@ -143,11 +134,13 @@ impl<I: Injector> InjectSink<I> {
 
 impl<I: Injector> InputSink for InjectSink<I> {
     fn motion_rel(&mut self, dx: i32, dy: i32) {
-        let r = self.inj.cursor().and_then(|c| {
-            let target = Point { x: c.x.saturating_add(dx), y: c.y.saturating_add(dy) };
-            self.inj.move_to(clamp_to_displays(&self.displays, target))
-        });
-        self.report("motion", r);
+        let now = std::time::Instant::now();
+        let r = self.posted.target(dx, dy, &self.displays, now, || self.inj.cursor()).and_then(|t| self.inj.move_to(t).map(|()| t));
+        match &r {
+            Ok(t) => self.posted.placed(*t, now),
+            Err(_) => self.posted.forget(),
+        }
+        self.report("motion", r.map(|_| ()));
     }
 
     fn button(&mut self, button: u8, down: bool) {
@@ -188,7 +181,12 @@ impl<I: Injector> InputSink for InjectSink<I> {
     }
 
     fn warp(&mut self, p: Point) {
-        let r = self.inj.move_to(clamp_to_displays(&self.displays, p));
+        let to = clamp_to_displays(&self.displays, p);
+        let r = self.inj.move_to(to);
+        match r {
+            Ok(()) => self.posted.placed(to, std::time::Instant::now()),
+            Err(_) => self.posted.forget(),
+        }
         self.report("warp", r);
     }
 
@@ -353,6 +351,32 @@ mod tests {
         assert_eq!(*rec.pos.lock().unwrap(), Point { x: 0, y: 480 });
     }
 
+    /// An OS that reports a moved cursor one move late, as macOS was measured to.
+    struct Lagging { rec: Rec, shown: Point }
+    impl Injector for Lagging {
+        fn key(&mut self, scan: Scan, down: bool) -> Result<(), String> { self.rec.key(scan, down) }
+        fn move_to(&mut self, p: Point) -> Result<(), String> {
+            self.shown = *self.rec.pos.lock().unwrap();
+            self.rec.move_to(p)
+        }
+        fn cursor(&mut self) -> Result<Point, String> { Ok(self.shown) }
+        fn button(&mut self, b: WinButton, down: bool) -> Result<(), String> { self.rec.button(b, down) }
+        fn wheel(&mut self, v: i32, h: i32) -> Result<(), String> { self.rec.wheel(v, h) }
+        fn num_lock(&mut self) -> Result<bool, String> { self.rec.num_lock() }
+    }
+
+    /// A burst of peer motion, as it arrives off the network, all lands even when the OS reports the cursor late.
+    #[test]
+    fn motion_faster_than_the_os_reports_the_cursor_adds_up() {
+        let rec = Rec::default();
+        *rec.pos.lock().unwrap() = Point { x: 100, y: 500 };
+        let mut s = InjectSink::new(Lagging { rec: rec.clone(), shown: Point { x: 100, y: 500 } }, screen(), |_| {});
+        for _ in 0..100 {
+            s.motion_rel(5, -1);
+        }
+        assert_eq!(*rec.pos.lock().unwrap(), Point { x: 600, y: 400 });
+    }
+
     #[test]
     fn keys_go_out_as_scan_codes_with_the_extended_flag() {
         let rec = Rec::default();
@@ -467,13 +491,5 @@ mod tests {
             s.key(0x04, true, false);
         }
         assert_eq!(LOG.lock().unwrap().len(), 1, "{:?}", LOG.lock().unwrap());
-    }
-
-    #[test]
-    fn clamp_picks_the_nearest_display_on_a_two_monitor_desktop() {
-        let two = vec![Rect { x: 0, y: 0, w: 1920, h: 1080 }, Rect { x: 1920, y: 0, w: 1280, h: 720 }];
-        // Below the shorter right monitor: snaps up onto it, not across to the left one.
-        assert_eq!(clamp_to_displays(&two, Point { x: 2500, y: 900 }), Point { x: 2500, y: 719 });
-        assert_eq!(clamp_to_displays(&two, Point { x: 10, y: 10 }), Point { x: 10, y: 10 });
     }
 }

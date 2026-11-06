@@ -23,6 +23,33 @@ const SETTLE: u32 = 50;
 
 static WANT_HIDDEN: AtomicBool = AtomicBool::new(false);
 
+/// AppKit work queued from other threads (the native drop), each with the time it may run from.
+#[cfg(target_os = "macos")]
+type MainTask = (std::time::Instant, Box<dyn FnOnce() + Send>);
+#[cfg(target_os = "macos")]
+static MAIN_TASKS: std::sync::Mutex<Vec<MainTask>> = std::sync::Mutex::new(Vec::new());
+
+/// Run `task` on the main thread, at `at` or later, from the next [`pump`] after that. Any thread.
+#[cfg(target_os = "macos")]
+pub fn on_main(at: std::time::Instant, task: Box<dyn FnOnce() + Send>) {
+    MAIN_TASKS.lock().unwrap_or_else(|e| e.into_inner()).push((at, task));
+}
+
+/// Main thread: the queued tasks that are due, in the order they were queued.
+#[cfg(target_os = "macos")]
+fn run_due_tasks() {
+    let now = std::time::Instant::now();
+    let due: Vec<MainTask> = {
+        let mut q = MAIN_TASKS.lock().unwrap_or_else(|e| e.into_inner());
+        let (due, later) = std::mem::take(&mut *q).into_iter().partition(|(at, _)| *at <= now);
+        *q = later;
+        due
+    };
+    for (_, task) in due {
+        task();
+    }
+}
+
 /// Ask for the cursor hidden (`true`) or shown. Any thread; applied by the next [`pump`].
 pub fn request(hidden: bool) {
     WANT_HIDDEN.store(hidden, Ordering::SeqCst);
@@ -109,7 +136,7 @@ impl Front {
 }
 
 #[cfg(target_os = "macos")]
-pub use sys_front::pump;
+pub use sys_front::{pump, start};
 
 #[cfg(target_os = "macos")]
 mod sys_front {
@@ -298,6 +325,23 @@ mod sys_front {
 
     const SLICE: Duration = Duration::from_millis(10);
 
+    fn new_state() -> (Front, Option<SysFront>) {
+        let os = SysFront::new();
+        if os.is_none() {
+            eprintln!("flowseam: AppKit unavailable; the cursor can only be hidden from the background");
+        }
+        (Front::default(), os)
+    }
+
+    /// Start AppKit, which installs its Apple event handlers as it starts, without handing it any event yet:
+    /// a handler that replaces one of AppKit's is then in place before the first event is dispatched.
+    /// Main thread only; `pump` does the same on its first call.
+    pub fn start() {
+        STATE.with(|s| {
+            s.borrow_mut().get_or_insert_with(new_state);
+        });
+    }
+
     /// Apply the requested cursor state and hand AppKit its events for `total` (at least once), in
     /// slices short enough that a request waits at most ~10 ms. Main thread only. If AppKit cannot be
     /// set up this logs once and just sleeps, leaving the background hide as the only attempt.
@@ -306,17 +350,12 @@ mod sys_front {
         let me = std::process::id() as i32;
         STATE.with(|s| {
             let mut s = s.borrow_mut();
-            let (front, os) = s.get_or_insert_with(|| {
-                let os = SysFront::new();
-                if os.is_none() {
-                    eprintln!("flowseam: AppKit unavailable; the cursor can only be hidden from the background");
-                }
-                (Front::default(), os)
-            });
+            let (front, os) = s.get_or_insert_with(new_state);
             loop {
                 // SAFETY: balanced push/pop on this thread.
                 let pool = unsafe { ffi::objc_autoreleasePoolPush() };
                 let left = end.saturating_duration_since(Instant::now());
+                super::run_due_tasks();
                 match os {
                     Some(os) => {
                         front.apply(WANT_HIDDEN.load(Ordering::SeqCst), me, os);

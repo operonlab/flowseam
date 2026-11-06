@@ -15,6 +15,7 @@ use crate::tap::{self, TapHandle};
 use flowseam_core::backend::{
     BackendError, CaptureSink, Clipboard, EmitOutcome, InputBackend, InputCapture, InputEmitter, Preflight,
 };
+use flowseam_core::cursor::PostedCursor;
 use flowseam_core::modifiers::{KeyError, KeyTracker};
 use flowseam_core::proto::{ModifierSet, Point, Rect, HID_LIMIT};
 use std::collections::BTreeSet;
@@ -26,7 +27,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex, Once};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 type DisplaySink = Mutex<Box<dyn Fn() + Send>>;
 
@@ -120,6 +121,8 @@ pub struct MacBackend {
     keys: KeyTracker,
     buttons: BTreeSet<u8>,
     tap_cfg: TapConfig,
+    /// Where this backend last sent the cursor: the base for the next relative move.
+    posted: PostedCursor,
 }
 
 impl MacBackend {
@@ -136,6 +139,7 @@ impl MacBackend {
             keys: KeyTracker::new(),
             buttons: BTreeSet::new(),
             tap_cfg: TapConfig::default(),
+            posted: PostedCursor::default(),
         }
     }
 
@@ -154,6 +158,12 @@ impl MacBackend {
     }
 
     fn post_button(&mut self, button: u8, down: bool) -> Result<(), BackendError> {
+        if button == 0 && crate::native::left_held() {
+            flowseam_core::log::line(&format!("flowseam: peer's button {button} {} during a native drag", if down { "down" } else { "up" }));
+        }
+        if button == 0 && !down {
+            crate::native::released(); // this release is a native drag's drop
+        }
         let (ty, btn) = match (button, down) {
             (0, true) => (ffi::EV_LEFT_DOWN, 0),
             (0, false) => (ffi::EV_LEFT_UP, 0),
@@ -166,7 +176,8 @@ impl MacBackend {
     }
 
     fn drag_type(&self) -> (u32, u32) {
-        if self.buttons.contains(&0) {
+        // A native drop's own press counts: its system drag follows only drag events.
+        if self.buttons.contains(&0) || crate::native::left_held() {
             (ffi::EV_LEFT_DRAGGED, 0)
         } else if self.buttons.contains(&1) {
             (ffi::EV_RIGHT_DRAGGED, 1)
@@ -337,14 +348,23 @@ impl InputEmitter for MacBackend {
     }
 
     fn move_rel(&mut self, dx: i32, dy: i32) -> Result<EmitOutcome, BackendError> {
-        let cur = sys::cursor_position()?;
-        self.move_abs(Point { x: cur.x + dx, y: cur.y + dy })
+        let displays = sys::active_displays()?;
+        let p = self.posted.target(dx, dy, &displays, Instant::now(), sys::cursor_position)?;
+        self.move_abs(p)
     }
 
     fn move_abs(&mut self, p: Point) -> Result<EmitOutcome, BackendError> {
         let (ty, btn) = self.drag_type();
         sys::post_mouse(ty, p, btn)?;
+        self.posted.placed(p, Instant::now());
         Ok(EmitOutcome::Delivered)
+    }
+
+    fn cursor_placed(&mut self, at: Option<Point>) {
+        match at {
+            Some(p) => self.posted.placed(p, Instant::now()),
+            None => self.posted.forget(),
+        }
     }
 
     fn button(&mut self, button: u8, down: bool) -> Result<EmitOutcome, BackendError> {
@@ -365,6 +385,11 @@ impl InputEmitter for MacBackend {
     fn key(&mut self, hid: u16, down: bool, repeat: bool) -> Result<EmitOutcome, BackendError> {
         if hid >= HID_LIMIT {
             return Err(BackendError::Unsupported);
+        }
+        // Volume, mute and transport keys act only as system-defined events here, not as key presses.
+        if let Some(nx) = crate::keymap::nx_key_for(hid) {
+            sys::post_media_key(nx, down)?;
+            return Ok(EmitOutcome::Delivered);
         }
         // Map before mutating state: an unmappable key must not enter the tracker.
         let kc = keycode_for(hid).ok_or(BackendError::Unsupported)?;
@@ -565,6 +590,28 @@ mod tests {
     fn change_count_read_is_real() {
         let b = MacBackend::new(temp_lock("cc"));
         assert!(b.change_count().is_ok());
+    }
+
+    /// Through the real backend: a peer's motion arriving back to back, as a burst off the network does, all
+    /// lands. Reading the cursor back before each move kept 2% of it (cursor.rs).
+    #[test]
+    #[ignore = "moves this Mac's cursor for a moment"]
+    fn back_to_back_peer_motion_travels_its_full_distance() {
+        let home = sys::cursor_position().unwrap();
+        let mut b = MacBackend::new(temp_lock("motion"));
+        let main = sys::active_displays().unwrap()[0];
+        let start = Point { x: main.x + main.w / 2 - 250, y: main.y + main.h / 2 };
+        b.move_abs(start).unwrap();
+        thread::sleep(Duration::from_millis(100));
+        b.cursor_placed(None);
+        let from = sys::cursor_position().unwrap();
+        for _ in 0..100 {
+            b.move_rel(5, 0).unwrap();
+        }
+        thread::sleep(Duration::from_millis(100));
+        let to = sys::cursor_position().unwrap();
+        let _ = sys::warp_cursor(home);
+        assert_eq!((to.x - from.x, to.y - from.y), (500, 0));
     }
 }
 
