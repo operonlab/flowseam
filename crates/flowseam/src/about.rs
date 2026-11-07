@@ -20,6 +20,11 @@ pub fn show_update_check() { UPDATE_CHECK_REQUESTED.store(true, AtomicOrdering::
 struct Note { icon: Icon, tint: Color32, title: &'static str, body: &'static str }
 struct Release { version: &'static str, items: &'static [Note] }
 const NOTES: &[Release] = &[
+    Release { version: "0.1.2", items: &[
+        Note { icon: Icon::Display, tint: PURPLE, title: "在 Windows 上也能直接放進資料夾", body: "從 Mac 拖到 Windows 的檔案，可以直接放進資料夾、桌面或 App，不再一律存到「下載」。" },
+        Note { icon: Icon::Arrows, tint: BLUE, title: "從 Windows 拖檔案回 Mac", body: "由 Mac 操作 Windows 時，在檔案總管把檔案拖到通往 Mac 的邊緣，就能放到 Mac 上想放的地方。Windows 上的檔案留在原處。" },
+        Note { icon: Icon::Grid, tint: TEAL, title: "多螢幕 Mac 的修正", body: "Mac 接了多個螢幕時，從另一台拖回來的檔案會放在你放開的地方，不再改存到「下載」。" },
+    ] },
     Release { version: "0.1.1", items: &[
         Note { icon: Icon::Display, tint: PURPLE, title: "在 Mac 上直接放進資料夾", body: "把檔案拖到 Mac 上，可以直接放進資料夾、桌面或 App。拖到 Windows 的檔案仍會存到「下載」。" },
         Note { icon: Icon::Grid, tint: ORANGE, title: "選單列與系統匣圖示", body: "Mac 的選單列和 Windows 的系統匣會顯示共用是否開啟、連著哪幾台。關掉視窗後 Flowseam 仍會繼續執行。" },

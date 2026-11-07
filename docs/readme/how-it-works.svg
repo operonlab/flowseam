@@ -1,0 +1,106 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="340" viewBox="0 0 980 340" role="img" aria-labelledby="t">
+  <title id="t">A MacBook Pro, a Mac mini with the keyboard and mouse, and a Windows PC side by side. Between the Macs the pointer and keyboard, clipboard text, files and media keys cross both ways. From the Mac mini to the Windows PC the pointer, keyboard and media keys go one way; clipboard text and files go both ways. The machines connect directly, over mutual TLS.</title>
+  <defs>
+    <linearGradient id="screen" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3b82f6"/>
+      <stop offset="1" stop-color="#a855f7"/>
+    </linearGradient>
+    <linearGradient id="screenDim" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2563eb"/>
+      <stop offset="1" stop-color="#7c3aed"/>
+    </linearGradient>
+    <marker id="headGreen" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#34d399"/>
+    </marker>
+    <marker id="headBlue" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#60a5fa"/>
+    </marker>
+    <symbol id="pointer" viewBox="0 0 24 24">
+      <path d="M6 3 L6 19 L10 15 L13 21.5 L15.6 20.4 L12.7 14 L18.5 14 Z" fill="#e5e7eb" stroke="#e5e7eb" stroke-width="1" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="keyboard" viewBox="0 0 24 24">
+      <rect x="2" y="6" width="20" height="12" rx="2.5" fill="none" stroke="#e5e7eb" stroke-width="1.8"/>
+      <g fill="#e5e7eb"><rect x="5" y="9" width="2" height="2" rx=".4"/><rect x="9" y="9" width="2" height="2" rx=".4"/><rect x="13" y="9" width="2" height="2" rx=".4"/><rect x="17" y="9" width="2" height="2" rx=".4"/><rect x="7" y="13" width="10" height="2" rx=".6"/></g>
+    </symbol>
+    <symbol id="clipboard" viewBox="0 0 24 24">
+      <rect x="5" y="4" width="14" height="18" rx="2.5" fill="none" stroke="#e5e7eb" stroke-width="1.8"/>
+      <rect x="8.5" y="2" width="7" height="4" rx="1.2" fill="#e5e7eb"/>
+      <path d="M8.5 11 H15.5 M8.5 15 H13.5" stroke="#e5e7eb" stroke-width="1.6" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="file" viewBox="0 0 24 24">
+      <path d="M6.5 2.5 H14 L19 7.5 V21.5 H6.5 Z" fill="none" stroke="#e5e7eb" stroke-width="1.8" stroke-linejoin="round"/>
+      <path d="M14 2.5 V7.5 H19" fill="none" stroke="#e5e7eb" stroke-width="1.8" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="speaker" viewBox="0 0 24 24">
+      <path d="M3.5 9 H7.5 L12.5 5 V19 L7.5 15 H3.5 Z" fill="#e5e7eb"/>
+      <path d="M15.5 8.5 A4.5 4.5 0 0 1 15.5 15.5 M18 6 A8 8 0 0 1 18 18" fill="none" stroke="#e5e7eb" stroke-width="1.8" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="lock" viewBox="0 0 24 24">
+      <rect x="5" y="11" width="14" height="10" rx="2" fill="#9ca3af"/>
+      <path d="M8 11 V8 A4 4 0 0 1 16 8 V11" fill="none" stroke="#9ca3af" stroke-width="2"/>
+    </symbol>
+  </defs>
+
+  <rect x="0.5" y="0.5" width="979" height="339" rx="20" fill="#16181d" stroke="#2b2e36"/>
+
+  <!-- MacBook Pro -->
+  <rect x="34" y="66" width="196" height="128" rx="9" fill="#2b2e36"/>
+  <rect x="42" y="74" width="180" height="112" rx="4" fill="url(#screenDim)"/>
+  <path d="M20 196 H244 L234 208 H30 Z" fill="#3a3e48"/>
+  <rect x="219" y="74" width="3" height="112" fill="#22d3ee"/>
+  <text x="132" y="240" fill="#e5e7eb" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" text-anchor="middle">MacBook Pro</text>
+
+  <!-- Mac mini, the computer with the keyboard and mouse -->
+  <rect x="380" y="46" width="220" height="148" rx="10" fill="#2b2e36"/>
+  <rect x="389" y="55" width="202" height="130" rx="4" fill="url(#screen)"/>
+  <rect x="389" y="55" width="3" height="130" fill="#22d3ee"/>
+  <rect x="588" y="55" width="3" height="130" fill="#22d3ee"/>
+  <rect x="478" y="194" width="24" height="14" fill="#3a3e48"/>
+  <rect x="452" y="206" width="76" height="6" rx="3" fill="#3a3e48"/>
+  <!-- the keyboard and mouse sit at this one -->
+  <rect x="418" y="220" width="128" height="18" rx="4" fill="#d1d5db"/>
+  <g fill="#6b7280"><rect x="426" y="225" width="112" height="2.5" rx="1"/><rect x="426" y="230.5" width="112" height="2.5" rx="1"/></g>
+  <rect x="556" y="217" width="16" height="23" rx="8" fill="#d1d5db"/>
+  <line x1="564" y1="219" x2="564" y2="226" stroke="#6b7280" stroke-width="1.5"/>
+  <text x="490" y="264" fill="#e5e7eb" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" text-anchor="middle">Mac mini</text>
+
+  <!-- Windows PC -->
+  <rect x="750" y="66" width="196" height="128" rx="9" fill="#2b2e36"/>
+  <rect x="758" y="74" width="180" height="112" rx="4" fill="url(#screenDim)"/>
+  <rect x="758" y="74" width="3" height="112" fill="#22d3ee"/>
+  <rect x="836" y="194" width="24" height="14" fill="#3a3e48"/>
+  <rect x="808" y="206" width="80" height="6" rx="3" fill="#3a3e48"/>
+  <text x="848" y="240" fill="#e5e7eb" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" text-anchor="middle">Windows PC</text>
+
+  <!-- Mac to Mac: everything, both ways -->
+  <g>
+    <use href="#pointer" x="250" y="66" width="22" height="22"/>
+    <use href="#keyboard" x="270" y="66" width="22" height="22"/>
+    <line x1="300" y1="77" x2="362" y2="77" stroke="#34d399" stroke-width="2.4" marker-start="url(#headGreen)" marker-end="url(#headGreen)"/>
+    <use href="#clipboard" x="260" y="104" width="22" height="22"/>
+    <line x1="300" y1="115" x2="362" y2="115" stroke="#34d399" stroke-width="2.4" marker-start="url(#headGreen)" marker-end="url(#headGreen)"/>
+    <use href="#file" x="260" y="142" width="22" height="22"/>
+    <line x1="300" y1="153" x2="362" y2="153" stroke="#34d399" stroke-width="2.4" marker-start="url(#headGreen)" marker-end="url(#headGreen)"/>
+    <use href="#speaker" x="260" y="180" width="22" height="22"/>
+    <line x1="300" y1="191" x2="362" y2="191" stroke="#34d399" stroke-width="2.4" marker-start="url(#headGreen)" marker-end="url(#headGreen)"/>
+  </g>
+
+  <!-- Mac to Windows: the Mac drives the PC; clipboard and files go both ways -->
+  <g>
+    <use href="#pointer" x="618" y="66" width="22" height="22"/>
+    <use href="#keyboard" x="638" y="66" width="22" height="22"/>
+    <line x1="668" y1="77" x2="732" y2="77" stroke="#60a5fa" stroke-width="2.4" marker-end="url(#headBlue)"/>
+    <use href="#clipboard" x="628" y="104" width="22" height="22"/>
+    <line x1="668" y1="115" x2="732" y2="115" stroke="#34d399" stroke-width="2.4" marker-start="url(#headGreen)" marker-end="url(#headGreen)"/>
+    <use href="#file" x="628" y="142" width="22" height="22"/>
+    <line x1="668" y1="153" x2="732" y2="153" stroke="#34d399" stroke-width="2.4" marker-start="url(#headGreen)" marker-end="url(#headGreen)"/>
+    <use href="#speaker" x="628" y="180" width="22" height="22"/>
+    <line x1="668" y1="191" x2="732" y2="191" stroke="#60a5fa" stroke-width="2.4" marker-end="url(#headBlue)"/>
+  </g>
+
+  <!-- Direct links, no server -->
+  <path d="M132 254 V300 H848 V254" fill="none" stroke="#4b5563" stroke-width="2" stroke-dasharray="6 6"/>
+  <line x1="490" y1="276" x2="490" y2="300" stroke="#4b5563" stroke-width="2" stroke-dasharray="6 6"/>
+  <g transform="translate(300 289)"><use href="#lock" width="22" height="22"/></g>
+  <g transform="translate(668 289)"><use href="#lock" width="22" height="22"/></g>
+</svg>

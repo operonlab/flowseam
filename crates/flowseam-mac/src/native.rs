@@ -12,7 +12,7 @@
 
 use std::cell::RefCell;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -52,6 +52,8 @@ const PRESS_AFTER: Duration = Duration::from_millis(150);
 /// Promise delegates are kept alive (the provider holds them weakly) until their file is written, or this long.
 const PROMISE_LIFETIME: Duration = Duration::from_secs(3600);
 const KEY_ESCAPE: u16 = 53;
+/// How many times the window may follow the cursor to another screen before pressing.
+const MAX_MOVES: u32 = 3;
 /// NSPopUpMenuWindowLevel: above ordinary windows, so the posted press lands on ours.
 const LEVEL_POPUP: isize = 101;
 
@@ -63,6 +65,8 @@ struct Shared {
     cancelled: AtomicBool,
     started: AtomicBool,
     first_move: AtomicBool,
+    /// Times the window followed the cursor to another screen before the press (bounded by `MAX_MOVES`).
+    moves: AtomicU32,
     ended: Mutex<Option<Ended>>,
     /// The app that was frontmost before the drag window took the front; it gets it back.
     front_before: Mutex<Option<i32>>,
@@ -89,6 +93,7 @@ impl NativeDrop for MacNativeDrop {
             cancelled: AtomicBool::new(false),
             started: AtomicBool::new(false),
             first_move: AtomicBool::new(false),
+            moves: AtomicU32::new(0),
             ended: Mutex::new(Some(ended)),
             front_before: Mutex::new(None),
         });
@@ -152,19 +157,12 @@ fn start(shared: Arc<Shared>) {
         shared.end(false);
         return;
     }
-    let screens = NSScreen::screens(mtm);
-    let (Ok(at), Some(main)) = (sys::cursor_position(), screens.firstObject()) else {
+    let at = sys::cursor_position();
+    let (Ok(at), Some(frame)) = (at.clone(), screen_frame_at(mtm, at.ok())) else {
         flowseam_core::log::line("flowseam native drop: no cursor or screen; the drop falls back to Downloads");
         shared.end(false);
         return;
     };
-    // Quartz measures from the top of the main screen, AppKit from its bottom.
-    let point = NSPoint::new(at.x as f64, main.frame().size.height - at.y as f64);
-    let frame = screens
-        .iter()
-        .map(|s| s.frame())
-        .find(|f| point.x >= f.origin.x && point.x < f.origin.x + f.size.width && point.y >= f.origin.y && point.y < f.origin.y + f.size.height)
-        .unwrap_or_else(|| main.frame());
     // SAFETY: main thread; a borderless window with no special requirements.
     let window = unsafe {
         NSWindow::initWithContentRect_styleMask_backing_defer(
@@ -192,12 +190,51 @@ fn start(shared: Arc<Shared>) {
     crate::front::on_main(Instant::now() + PRESS_AFTER, Box::new(move || press(s)));
 }
 
+/// Index of the frame (AppKit coordinates: x, y, width, height) that contains `p`.
+fn screen_index(p: (f64, f64), frames: &[(f64, f64, f64, f64)]) -> Option<usize> {
+    frames.iter().position(|&(x, y, w, h)| p.0 >= x && p.0 < x + w && p.1 >= y && p.1 < y + h)
+}
+
+/// The frame of the screen the cursor is on (the main screen when it is on none), in AppKit coordinates.
+fn screen_frame_at(mtm: MainThreadMarker, at: Option<flowseam_core::proto::Point>) -> Option<NSRect> {
+    let screens = NSScreen::screens(mtm);
+    let main = screens.firstObject()?.frame();
+    let frames: Vec<NSRect> = screens.iter().map(|s| s.frame()).collect();
+    let tuples: Vec<_> = frames.iter().map(|f| (f.origin.x, f.origin.y, f.size.width, f.size.height)).collect();
+    // Quartz measures from the top of the main screen, AppKit from its bottom.
+    let point = at.map(|at| (at.x as f64, main.size.height - at.y as f64));
+    Some(point.and_then(|p| screen_index(p, &tuples)).map_or(main, |i| frames[i]))
+}
+
 /// Main thread, once the window is on screen: press where the cursor is now, and give up if no drag starts.
 fn press(shared: Arc<Shared>) {
     if shared.cancelled.load(Ordering::SeqCst) {
         finish(&shared);
         shared.end(false);
         return;
+    }
+    // A drag carried back from the machine this Mac was driving arrives before the cursor is put back: the window
+    // went up over the screen of the parked cursor, which need not be the screen the cursor comes home on. Move it
+    // there and press after it has settled, or the press misses it and the drop falls back to Downloads. A cursor
+    // still crossing screens meanwhile is followed again, a few times at most.
+    if let (Some(mtm), true) = (MainThreadMarker::new(), shared.moves.load(Ordering::SeqCst) < MAX_MOVES) {
+        let to = screen_frame_at(mtm, sys::cursor_position().ok());
+        let moved = WINDOWS.with(|w| {
+            w.borrow().iter().find(|(d, _)| *d == shared.drag).is_some_and(|(_, win)| match to {
+                Some(to) if win.frame() != to => {
+                    win.setFrame_display(to, true);
+                    true
+                }
+                _ => false,
+            })
+        });
+        if moved {
+            shared.moves.fetch_add(1, Ordering::SeqCst);
+            flowseam_core::log::line(&format!("flowseam native drop: drag {} window moved to the cursor's screen", shared.drag));
+            let s = shared.clone();
+            crate::front::on_main(Instant::now() + PRESS_AFTER, Box::new(move || press(s)));
+            return;
+        }
     }
     match sys::cursor_position().and_then(|at| sys::post_mouse(ffi::EV_LEFT_DOWN, at, 0).map(|()| at)) {
         Ok(at) => {
@@ -410,5 +447,24 @@ impl Promise {
         let this = Self::alloc().set_ivars(PromiseIvars { shared, index, queue });
         // SAFETY: NSObject's init.
         unsafe { msg_send![super(this), init] }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::screen_index;
+
+    /// The test Mac's layout in AppKit coordinates: a 2560x1440 main screen and a 1920x1080 screen to its right whose
+    /// top is 157 px below the main screen's top.
+    const SCREENS: [(f64, f64, f64, f64); 2] = [(0.0, 0.0, 2560.0, 1440.0), (2560.0, 203.0, 1920.0, 1080.0)];
+
+    #[test]
+    fn the_screen_is_the_one_under_the_cursor_not_the_main_one() {
+        assert_eq!(screen_index((1280.0, 720.0), &SCREENS), Some(0), "the parked cursor, main screen");
+        assert_eq!(screen_index((4455.0, 430.0), &SCREENS), Some(1), "home at the right edge of the second screen");
+        assert_eq!(screen_index((2560.0, 203.0), &SCREENS), Some(1), "a frame includes its own origin");
+        assert_eq!(screen_index((2559.9, 300.0), &SCREENS), Some(0));
+        assert_eq!(screen_index((4480.0, 430.0), &SCREENS), None, "past the right edge of every screen");
+        assert_eq!(screen_index((3000.0, 100.0), &SCREENS), None, "the gap under the second screen");
     }
 }

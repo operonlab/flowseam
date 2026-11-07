@@ -12,6 +12,10 @@ use flowseam_core::cursor::PostedCursor;
 use flowseam_core::forward::{InputSink, Outbox};
 use flowseam_core::proto::{Msg, Point, Rect};
 use flowseam_net::files::DragHub;
+#[cfg(windows)]
+use crate::edge_drop::EdgeDropSource;
+#[cfg(windows)]
+use flowseam_core::proto::Edge;
 
 use crate::keymap::{hid_to_scan, Scan};
 
@@ -94,13 +98,15 @@ pub struct InjectSink<I: Injector> {
     /// again too soon would toggle it back off.
     num_lock_sent: Option<std::time::Instant>,
     drags: Option<Arc<Mutex<DragHub>>>,
+    #[cfg(windows)]
+    edge_drop: Option<(EdgeDropSource, Edge)>,
     /// Where this sink last sent the cursor: the base for the next relative move (see flowseam_core::cursor).
     posted: PostedCursor,
 }
 
 impl<I: Injector> InjectSink<I> {
     pub fn new(inj: I, displays: Vec<Rect>, log: fn(&str)) -> Self {
-        InjectSink { inj, displays, log, last_err: None, num_lock_sent: None, drags: None, posted: PostedCursor::default() }
+        InjectSink { inj, displays, log, last_err: None, num_lock_sent: None, drags: None, posted: PostedCursor::default(), #[cfg(windows)] edge_drop: None }
     }
 
     /// File drags: presses and crossings go to `hub`.
@@ -109,7 +115,15 @@ impl<I: Injector> InjectSink<I> {
         self
     }
 
+    #[cfg(windows)]
+    pub fn with_edge_drop(mut self, source: EdgeDropSource, edge: Edge) -> Self {
+        self.edge_drop = Some((source, edge));
+        self
+    }
+
     pub fn set_displays(&mut self, d: Vec<Rect>) {
+        #[cfg(windows)]
+        if let Some((source, edge)) = &self.edge_drop { source.set_edge(*edge, d.clone()); }
         self.displays = d;
         self.posted.forget();
     }
@@ -202,6 +216,8 @@ impl<I: Injector> InputSink for InjectSink<I> {
     /// Windows cannot detach the physical mouse; it simply keeps working alongside the peer.
     fn set_association(&mut self, _connected: bool) {}
     fn primary(&mut self, down: bool) {
+        #[cfg(windows)]
+        if let Some((source, _)) = &self.edge_drop { source.arm(down); }
         if let Some(hub) = &self.drags {
             hub.lock().unwrap_or_else(|e| e.into_inner()).primary(down);
         }
@@ -210,6 +226,8 @@ impl<I: Injector> InputSink for InjectSink<I> {
         self.drags.as_ref().is_none_or(|hub| hub.lock().unwrap_or_else(|e| e.into_inner()).drag_started())
     }
     fn drag_away(&mut self, peer: &str) {
+        #[cfg(windows)]
+        if let Some((source, _)) = &self.edge_drop { source.arm(false); }
         let sent = self.drags.as_ref().is_some_and(|hub| hub.lock().unwrap_or_else(|e| e.into_inner()).drag_away(peer));
         if sent {
             // The files went to the peer; the drag here must end without dropping them at the edge.

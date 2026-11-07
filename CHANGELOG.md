@@ -4,7 +4,24 @@
 All notable changes to Flowseam are listed here, newest first. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.1.2] - 2026-11-08
+
+### Upgrading
+
+- Update the Mac and the Windows PC together. The new file drags were tested with 0.1.2 on both.
+- On Windows, build the new version from source and replace the old `flowseam.exe`.
+
+### Added
+
+- A file dragged from a Mac onto a Windows PC stays a drag there: release it over a folder, the desktop or an app
+  that takes files. It no longer always lands in Downloads; released over nothing that takes files, it still does.
+- Files can be dragged out of Windows: while a Mac drives the PC, drag a file in Explorer to the edge that leads
+  back to the Mac and release it where you want it there. The file stays where it was on Windows.
+
+### Fixed
+
+- On a Mac with more than one screen, a file dragged back from the computer it was driving lands where it is
+  released. When the cursor came home on a screen other than the main one, it fell back to Downloads.
 
 ## [0.1.1] - 2026-11-06
 

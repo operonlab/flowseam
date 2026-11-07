@@ -12,6 +12,9 @@ pub mod app;
 pub mod inject;
 pub mod keymap;
 pub mod stdio;
+pub mod native_drop;
+#[cfg(windows)]
+pub mod edge_drop;
 #[cfg(windows)]
 pub mod win32;
 #[cfg(windows)]

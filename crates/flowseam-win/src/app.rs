@@ -17,7 +17,9 @@ use flowseam_core::proto::{self, Msg, Rect};
 use flowseam_core::switch::SwitchPolicy;
 use flowseam_core::status::{self, LinkStatus};
 use flowseam_net::backoff::Backoff;
-use flowseam_net::files::{DragHub, DragInbox, DragPump, SendFn};
+use flowseam_net::files::{DragHub, DragInbox, DragPump, DragSource, SendFn};
+#[cfg(windows)]
+use crate::edge_drop::EdgeDropSource;
 use flowseam_net::identity::{from_hex, to_hex, Identity};
 use flowseam_net::link::{self, Endpoint};
 use flowseam_net::pair::{self, PairGuard};
@@ -167,19 +169,20 @@ fn drag_dirs() -> Option<(PathBuf, PathBuf)> {
 }
 
 /// A drag hub for one session's one peer, and the queue the router hands drag messages to.
-fn session_drags(out: &Sender<Msg>, dirs: Option<(PathBuf, PathBuf)>) -> Option<(Arc<Mutex<DragHub>>, DragInbox)> {
+fn session_drags(out: &Sender<Msg>, dirs: Option<(PathBuf, PathBuf)>, source: Option<Box<dyn DragSource>>) -> Option<(Arc<Mutex<DragHub>>, DragInbox)> {
     let Some((staging, dest)) = dirs else {
         log("no user profile in the environment: file drags are off");
         return None;
     };
     let pump = DragPump::new(staging, dest);
     #[cfg(windows)]
+    let pump = pump.with_native(Arc::new(crate::native_drop::WinNativeDrop::new()));
+    #[cfg(windows)]
     let pump = pump.with_free_space(Arc::new(|p: &Path| crate::win32::free_bytes(p)));
     let pump = Arc::new(Mutex::new(pump));
     let tx = out.clone();
     let send: SendFn = Arc::new(move |m| tx.send(m).is_ok());
-    // ponytail: no drag source on Windows yet, so drags only arrive here; reading an OLE drag needs a drop-target window.
-    let mut hub = DragHub::new(None);
+    let mut hub = DragHub::new(source);
     hub.attach(SESSION_PEER, pump, send);
     let inbox = hub.inbox(SESSION_PEER).expect("just attached");
     Some((Arc::new(Mutex::new(hub)), inbox))
@@ -192,8 +195,17 @@ fn with_session<R>(host: &Host<'_>, fwd_cfg: &FwdConfig, link: impl FnOnce(&Rece
     let (in_tx, in_rx) = channel();
     let (clip_tx, clip_rx) = channel();
     let displays = (host.displays)()?;
-    let drags = session_drags(&out_tx, drag_dirs());
+    let dirs = drag_dirs();
+    #[cfg(windows)]
+    let edge_drop = dirs.as_ref().map(|_| EdgeDropSource::new(fwd_cfg.peers[0].edge, displays.clone()));
+    #[cfg(windows)]
+    let source: Option<Box<dyn DragSource>> = edge_drop.clone().map(|s| Box::new(s) as Box<dyn DragSource>);
+    #[cfg(not(windows))]
+    let source: Option<Box<dyn DragSource>> = None;
+    let drags = session_drags(&out_tx, dirs, source);
     let mut sink = InjectSink::new((host.injector)(), displays.clone(), log);
+    #[cfg(windows)]
+    if let Some(source) = edge_drop { sink = sink.with_edge_drop(source, fwd_cfg.peers[0].edge); }
     if let Some((hub, _)) = &drags {
         sink = sink.with_drags(hub.clone());
     }
@@ -400,12 +412,16 @@ mod tests {
 
         /// `dirs`: (staging, destination) for file drags, as `drag_dirs` gives them.
         fn rig_with(dirs: Option<(PathBuf, PathBuf)>) -> Rig {
+            rig_with_source(dirs, None)
+        }
+
+        fn rig_with_source(dirs: Option<(PathBuf, PathBuf)>, source: Option<Box<dyn DragSource>>) -> Rig {
             let rec = Rec(Arc::new(Mutex::new((vec![], Point { x: 960, y: 540 }))));
             let (to_router, in_rx) = channel();
             let (out_tx, from_fwd) = channel();
             let (clip_tx, clip) = channel();
             let cfg = fwd_config(&Config::default()).unwrap();
-            let drags = dirs.and_then(|d| session_drags(&out_tx, Some(d)));
+            let drags = dirs.and_then(|d| session_drags(&out_tx, Some(d), source));
             let mut sink = InjectSink::new(Box::new(rec.clone()) as Box<dyn Injector>, screen().unwrap(), |_| {});
             if let Some((hub, _)) = &drags {
                 sink = sink.with_drags(hub.clone());
@@ -449,6 +465,71 @@ mod tests {
 
         fn enter(seq: u32) -> Msg {
             Msg::Enter { seq, edge: proto::Edge::Left, frac: 0x8000, mods: ModifierSet(0), pressed: vec![] }
+        }
+
+        #[derive(Clone)]
+        struct FakeSource {
+            generation: Arc<std::sync::atomic::AtomicU64>,
+            file: PathBuf,
+        }
+
+        impl DragSource for FakeSource {
+            fn generation(&self) -> Result<u64, String> {
+                Ok(self.generation.load(std::sync::atomic::Ordering::SeqCst))
+            }
+            fn files(&self) -> Result<Vec<PathBuf>, String> { Ok(vec![self.file.clone()]) }
+        }
+
+        #[test]
+        fn file_drag_returns_to_mac_but_held_non_drag_stays() {
+            let root = std::env::temp_dir().join(format!("flowseam-win-source-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).unwrap();
+            let file = root.join("out.txt");
+            std::fs::write(&file, b"source").unwrap();
+            for started in [true, false] {
+                let source = FakeSource { generation: Arc::new(std::sync::atomic::AtomicU64::new(0)), file: file.clone() };
+                let r = rig_with_source(Some((root.join("staging"), root.join("dest"))), Some(Box::new(source.clone())));
+                r.to_router.send(enter(1)).unwrap();
+                r.to_router.send(Msg::Button { seq: 1, button: 0, down: true }).unwrap();
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while !ops(&r).contains(&Op::Button(WinButton::Left, true)) && Instant::now() < deadline {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                assert!(ops(&r).contains(&Op::Button(WinButton::Left, true)));
+                if started { source.generation.store(1, std::sync::atomic::Ordering::SeqCst); }
+                r.to_router.send(Msg::MotionRel { seq: 1, dx: -5000, dy: 0 }).unwrap();
+                if started {
+                    assert!(matches!(r.from_fwd.recv_timeout(Duration::from_secs(2)), Ok(Msg::DragSoon { .. })));
+                    let mut left = false;
+                    let mut began = false;
+                    for _ in 0..4 {
+                        match r.from_fwd.recv_timeout(Duration::from_secs(2)).unwrap() {
+                            Msg::Leave { .. } => left = true,
+                            Msg::DragBegin { files, .. } => {
+                                assert_eq!(files[0].name, "out.txt");
+                                began = true;
+                            }
+                            Msg::FileChunk { .. } => {}
+                            other => panic!("unexpected message: {other:?}"),
+                        }
+                        if left && began { break; }
+                    }
+                    assert!(left && began, "expected Leave and DragBegin");
+                    let events = ops(&r);
+                    let escape = events.iter().position(|op| *op == Op::Key(0x01, true)).expect("Escape injected");
+                    let release = events.iter().position(|op| *op == Op::Button(WinButton::Left, false)).expect("button released");
+                    assert!(escape < release, "Escape must cancel before release: {events:?}");
+                    assert!(file.exists());
+                } else {
+                    // Three times the 200 ms dwell: a wrong crossing would have sent Leave well within this.
+                    assert!(r.from_fwd.recv_timeout(Duration::from_millis(600)).is_err(), "held press without drag must stay");
+                    assert!(!ops(&r).contains(&Op::Key(0x01, true)));
+                }
+                drop(r.to_router);
+                r.router.join().unwrap();
+            }
+            let _ = std::fs::remove_dir_all(&root);
         }
 
         #[test]

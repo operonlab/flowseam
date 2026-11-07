@@ -34,6 +34,11 @@
     "ja": "Macのショートカット",
     "ko": "Mac 단축키"
   },
+  "Mac 接了多個螢幕時，從另一台拖回來的檔案會放在你放開的地方，不再改存到「下載」。": {
+    "en": "On a Mac with more than one screen, a file dragged back from the other computer lands where you release it instead of in Downloads.",
+    "ja": "複数のディスプレイをつないだ Mac でも、別のコンピュータからドラッグして戻したファイルが、「ダウンロード」ではなくボタンを離した場所に置かれます。",
+    "ko": "화면이 여러 개인 Mac에서도 다른 컴퓨터에서 끌어온 파일이 다운로드 폴더가 아니라 놓은 위치에 놓입니다."
+  },
   "Mac 的游標移過來時，就由 Mac 操作這台電腦。": {
     "en": "Move the Mac pointer here to control this computer.",
     "ja": "Macのポインタを移動すると、このコンピュータを操作できます。",
@@ -264,6 +269,11 @@
     "ja": "Mac ではフォルダへ直接ドロップ",
     "ko": "Mac에서는 폴더에 바로 놓기"
   },
+  "在 Windows 上也能直接放進資料夾": {
+    "en": "Drop into folders on Windows too",
+    "ja": "Windows でもフォルダへ直接ドロップ",
+    "ko": "Windows에서도 폴더에 바로 놓기"
+  },
   "在{}側": {
     "en": "On the {} side",
     "ja": "{}側",
@@ -293,6 +303,11 @@
     "en": "The app's path contains a quote that cannot be escaped",
     "ja": "アプリのパスに扱えない引用符が含まれています",
     "ko": "앱 경로에 처리할 수 없는 따옴표가 있습니다"
+  },
+  "多螢幕 Mac 的修正": {
+    "en": "Fix for Macs with several screens",
+    "ja": "複数ディスプレイの Mac での修正",
+    "ko": "여러 화면을 쓰는 Mac 수정"
   },
   "它在這台螢幕的哪一側": {
     "en": "Which side of this display it is on",
@@ -383,6 +398,16 @@
     "en": "Paired · {}",
     "ja": "ペアリング済み · {}",
     "ko": "페어링됨 · {}"
+  },
+  "從 Mac 拖到 Windows 的檔案，可以直接放進資料夾、桌面或 App，不再一律存到「下載」。": {
+    "en": "A file dragged from a Mac onto a Windows PC can go straight into a folder, the desktop or an app, instead of always landing in Downloads.",
+    "ja": "Mac から Windows にドラッグしたファイルは、フォルダ、デスクトップ、アプリにそのままドロップできます。常に「ダウンロード」に保存されることはなくなりました。",
+    "ko": "Mac에서 Windows로 끌어온 파일을 폴더, 데스크톱, 앱에 바로 놓을 수 있습니다. 더 이상 항상 다운로드 폴더에 저장되지 않습니다."
+  },
+  "從 Windows 拖檔案回 Mac": {
+    "en": "Drag files from Windows back to a Mac",
+    "ja": "Windows から Mac へファイルをドラッグ",
+    "ko": "Windows에서 Mac으로 파일 끌어오기"
   },
   "快捷鍵": {
     "en": "Shortcut",
@@ -653,6 +678,11 @@
     "en": "Update with Homebrew",
     "ja": "Homebrew でアップデート",
     "ko": "Homebrew로 업데이트"
+  },
+  "由 Mac 操作 Windows 時，在檔案總管把檔案拖到通往 Mac 的邊緣，就能放到 Mac 上想放的地方。Windows 上的檔案留在原處。": {
+    "en": "While a Mac drives the PC, drag a file in File Explorer to the edge that leads to the Mac and drop it where you want it there. The file stays where it was on Windows.",
+    "ja": "Mac から Windows を操作しているとき、エクスプローラーでファイルを Mac 側の端までドラッグすると、Mac 上の好きな場所にドロップできます。Windows 上のファイルはそのまま残ります。",
+    "ko": "Mac으로 Windows를 제어하는 동안 파일 탐색기에서 파일을 Mac 쪽 가장자리로 끌면 Mac의 원하는 위치에 놓을 수 있습니다. Windows의 파일은 그대로 남습니다."
   },
   "登入時自動開啟": {
     "en": "Open at Login",

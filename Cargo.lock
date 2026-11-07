@@ -1317,7 +1317,7 @@ dependencies = [
 
 [[package]]
 name = "flowseam"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "eframe",
  "flowseam-core",
@@ -1335,7 +1335,7 @@ dependencies = [
 
 [[package]]
 name = "flowseam-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "postcard",
  "serde",
@@ -1344,7 +1344,7 @@ dependencies = [
 
 [[package]]
 name = "flowseam-mac"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "block2 0.6.2",
  "flowseam-core",
@@ -1357,7 +1357,7 @@ dependencies = [
 
 [[package]]
 name = "flowseam-net"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "flowseam-core",
  "hmac",
@@ -1370,10 +1370,12 @@ dependencies = [
 
 [[package]]
 name = "flowseam-win"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "flowseam-core",
  "flowseam-net",
+ "windows",
+ "windows-core",
  "windows-sys 0.59.0",
 ]
 

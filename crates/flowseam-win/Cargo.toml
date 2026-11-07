@@ -1,6 +1,6 @@
 [package]
 name = "flowseam-win"
-version = "0.1.1"
+version = "0.1.2"
 license = "MIT"
 edition = "2021"
 
@@ -13,6 +13,23 @@ flowseam-core = { path = "../flowseam-core" }
 flowseam-net = { path = "../flowseam-net" }
 
 [target.'cfg(windows)'.dependencies]
+# COM objects for OLE drag and drop (IDataObject, IDropSource, IDropTarget, IStream) through `#[implement]`.
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_System_SystemServices",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+] }
+# `#[implement]` expands to paths in `windows_core`, so it must be a direct dependency.
+windows-core = "0.62.2"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_System_DataExchange",

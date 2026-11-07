@@ -1,7 +1,13 @@
 # Native drop: the drag stays a drag on the other side
 
-Status: the Mac receiver is implemented (0.1.1). The Windows receiver and dragging out of Windows are designed and
-spiked (2026-11-05), not implemented; on Windows an arriving drag still lands in Downloads.
+Status: all three steps are implemented. The Mac receiver shipped in 0.1.1; the Windows receiver
+(`crates/flowseam-win/src/native_drop.rs`) and dragging out of Windows (`crates/flowseam-win/src/edge_drop.rs`) in
+0.1.2, with desktop probes in `crates/flowseam-win/examples/` (`native_drop_probe`, `edge_drop_probe`).
+
+A drag carried back to the Mac that was driving arrives before its cursor is put back, so the Mac's drag window first
+goes up over the screen of the parked cursor; it moves to the screen the cursor comes home on before the press
+(`native.rs`, `press`). Without that move, on a Mac whose peer sits on a second screen, every drag out of Windows fell
+back to Downloads (measured 2026-11-07, before and after).
 
 ## Goal
 
