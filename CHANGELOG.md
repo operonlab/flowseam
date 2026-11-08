@@ -4,6 +4,30 @@
 All notable changes to Flowseam are listed here, newest first. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.1.3] - 2026-11-08
+
+### Upgrading
+
+- The relay below runs on the Mac in the middle, so that Mac needs 0.1.3; the computers on either side connect to
+  it as before. Keeping every machine on the same version is still the safe choice.
+- Windows now has a ready-built `Flowseam-0.1.3-windows-x64.exe` on the Releases page. To update, quit
+  Flowseam from the tray and replace the old `flowseam.exe` with it.
+
+### Added
+
+- Through one Mac to the next: while one Mac drives another, pushing the pointer to the edge that leads from that
+  Mac to one of its own computers carries on there, for example from a MacBook through a Mac mini to a Windows PC.
+  The far computer hands the pointer back to the Mac in the middle as usual. File drags do not take this route yet.
+- The computer you touch takes over: while another computer drives a Mac, moving that Mac's own mouse, clicking,
+  scrolling or pressing a key on it (modifier keys alone do not count) gives control back to it. If that Mac was
+  passing the pointer on to a third computer, it goes on driving that computer itself.
+- A ready-built Windows exe on the Releases page. It is not signed, so Windows SmartScreen warns on first launch.
+
+### Fixed
+
+- When another computer drives a Mac with more than one screen, the pointer reaches every screen. It used to stop
+  at the edge of the screen it entered.
+
 ## [0.1.2] - 2026-11-08
 
 ### Upgrading

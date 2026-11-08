@@ -33,7 +33,8 @@ https://github.com/user-attachments/assets/be5499eb-c39a-4722-b87a-0203b3a30c64
 ## 與眾不同之處
 
 - **刻意才切換。** 讓游標在共用的邊緣停留 200 毫秒，或按下 ⌃⌥⌘S。按住滑鼠按鍵時，游標會留在原本的螢幕上，因此拖移視窗或選取文字時不會誤滑到下一台電腦；拖曳檔案是唯一的例外。
-- **永遠有退路。** 按 ⌃⌥⌘Esc 就能把滑鼠與鍵盤拿回這台 Mac。如果背景程序當掉，或 macOS 在共用期間收回權限，輸入會被釋放，而不會一直被鎖住。
+- **經過一台 Mac 控制下一台。** MacBook 操作 Mac mini 時，可以一路推到 Mac mini 另一側的 Windows PC：中間那台 Mac 會把游標和按鍵轉送過去。
+- **永遠有退路。** 按 ⌃⌥⌘Esc 就能把滑鼠與鍵盤拿回這台 Mac。另一台電腦正在操作某台 Mac 時，碰一下那台 Mac 的滑鼠或鍵盤，就由它接手。如果背景程序當掉，或 macOS 在共用期間收回權限，輸入會被釋放，而不會一直被鎖住。
 - **在 Windows 上使用 Mac 快捷鍵。** ⌘C 複製、⌘Tab 切換 App、單按 ⌥ 開啟「開始」功能表。詳見[按鍵與快捷鍵](#按鍵與快捷鍵)。
 - **Mac 之間最快的連線。** 兩台 Mac 之間有多條網路相連時，Flowseam 會使用最快的一條：Thunderbolt 或乙太網路優先於 Wi‑Fi。
 - **以隱私為設計原則。** 只需用 6 位數配對碼配對一次；之後的每個連線都是你自己機器之間的雙向 TLS。沒有任何遙測。詳見[隱私與網路](#隱私與網路)。
@@ -54,9 +55,9 @@ https://github.com/user-attachments/assets/be5499eb-c39a-4722-b87a-0203b3a30c64
 
 | | macOS 13 或更新版本（Apple silicon 與 Intel） | Windows 10 或 11 |
 |---|---|---|
-| 取得 | Homebrew，或從 [Releases](https://github.com/operonlab/flowseam/releases) 下載 zip | 從原始碼建置（目前還沒有安裝程式） |
+| 取得 | Homebrew，或從 [Releases](https://github.com/operonlab/flowseam/releases) 下載 zip | 從 [Releases](https://github.com/operonlab/flowseam/releases) 下載 exe，或從原始碼建置（目前還沒有安裝程式） |
 | 允許 | 輔助使用與輸入監控 | 出現提示時允許 Windows 防火牆（TCP 24800） |
-| 更新 | `brew upgrade --cask flowseam` | 建置新版本，並取代 `flowseam.exe` |
+| 更新 | `brew upgrade --cask flowseam` | 下載新的 exe，取代舊的 |
 
 ### macOS
 
@@ -70,7 +71,9 @@ Flowseam 是以自己的憑證簽署，沒有經過 Apple 公證。Homebrew cask
 
 ### Windows
 
-請用 Rust（stable，MSVC 工具鏈）自行建置：
+從 [Releases](https://github.com/operonlab/flowseam/releases) 下載 `Flowseam-<version>-windows-x64.exe`，放在它自己的資料夾（例如 `%LOCALAPPDATA%\Programs\Flowseam`）後執行。這個 exe 沒有簽署，第一次執行時 Windows SmartScreen 會顯示「Windows 已保護您的電腦」：請選擇**其他資訊**，再選擇**仍要執行**。
+
+也可以用 Rust（stable，MSVC 工具鏈）自行建置：
 
 ```powershell
 git clone https://github.com/operonlab/flowseam
@@ -141,7 +144,7 @@ Flowseam 會開啟設定視窗，並在系統匣放上一個圖示。出現提�
 - Windows PC 可以被控制，但不能控制另一台電腦。
 - 剪貼簿只傳送文字：不含圖片、格式化文字或檔案。
 - 不支援 Linux。
-- Windows 沒有安裝程式，也沒有簽署過的版本，請從原始碼建置。
+- Windows 沒有安裝程式，exe 也沒有簽署：第一次執行時 SmartScreen 會警告。
 - 電腦是依你輸入的位址找到的；目前還沒有在區域網路上自動探索的功能。
 
 ## 疑難排解

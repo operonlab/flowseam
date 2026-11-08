@@ -38,8 +38,11 @@ https://github.com/user-attachments/assets/be5499eb-c39a-4722-b87a-0203b3a30c64
 - **의도해서 전환.** 공유된 가장자리에 포인터를 200 ms 동안 두거나 ⌃⌥⌘S를 누릅니다. 마우스 버튼을 누르고
   있는 동안에는 포인터가 현재 화면에 머물기 때문에, 창을 끌거나 텍스트를 선택하다가 다음 컴퓨터로
   넘어가는 일은 없습니다. 파일 끌어다 놓기만 예외입니다.
-- **항상 돌아올 길이 있음.** ⌃⌥⌘Esc를 누르면 마우스와 키보드가 Mac으로 돌아옵니다. 백그라운드 프로세스가
-  멈추거나 공유 중에 macOS가 권한을 회수해도 입력이 잠긴 채로 남지 않고 해제됩니다.
+- **Mac을 거쳐 다음 컴퓨터로.** MacBook으로 Mac mini를 제어하는 동안 그 너머의 Windows PC까지 이어서 제어할 수
+  있습니다. 가운데 Mac이 포인터와 키 입력을 전달합니다.
+- **항상 돌아올 길이 있음.** ⌃⌥⌘Esc를 누르면 마우스와 키보드가 Mac으로 돌아옵니다. 다른 컴퓨터가 제어 중인 Mac의
+  마우스나 키보드를 만지면 그 Mac이 제어를 이어받습니다. 백그라운드 프로세스가 멈추거나 공유 중에 macOS가 권한을
+  회수해도 입력이 잠긴 채로 남지 않고 해제됩니다.
 - **Windows에서 Mac 단축키 사용.** ⌘C는 복사, ⌘Tab은 앱 전환, ⌥ 단독 입력은 시작 메뉴 열기입니다.
   [키와 단축키](#키와-단축키)를 참고하세요.
 - **Mac 간 가장 빠른 연결.** 두 Mac이 둘 이상의 네트워크로 연결되어 있으면 Flowseam은 가장 빠른 쪽을
@@ -65,9 +68,9 @@ https://github.com/user-attachments/assets/be5499eb-c39a-4722-b87a-0203b3a30c64
 
 | | macOS 13 이상(Apple silicon 및 Intel) | Windows 10 또는 11 |
 |---|---|---|
-| 받기 | Homebrew, 또는 [Releases](https://github.com/operonlab/flowseam/releases)의 zip | 소스에서 빌드(아직 설치 프로그램 없음) |
+| 받기 | Homebrew, 또는 [Releases](https://github.com/operonlab/flowseam/releases)의 zip | [Releases](https://github.com/operonlab/flowseam/releases)의 exe, 또는 소스에서 빌드(아직 설치 프로그램 없음) |
 | 허용 | 손쉬운 사용 및 입력 모니터링 | 요청 시 Windows 방화벽(TCP 24800) |
-| 업데이트 | `brew upgrade --cask flowseam` | 새 버전을 빌드해 `flowseam.exe` 교체 |
+| 업데이트 | `brew upgrade --cask flowseam` | 새 exe를 받아 기존 파일 교체 |
 
 ### macOS
 
@@ -85,7 +88,11 @@ Flowseam은 자체 인증서로 서명되어 있으며 Apple의 공증을 받지
 
 ### Windows
 
-Rust(stable, MSVC 툴체인)로 빌드하세요.
+[Releases](https://github.com/operonlab/flowseam/releases)에서 `Flowseam-<version>-windows-x64.exe`를 받아 전용 폴더(예: `%LOCALAPPDATA%\Programs\Flowseam`)에 두고
+실행하세요. exe에 서명이 없어 처음 실행할 때 Windows SmartScreen이 "Windows의 PC 보호"를 표시합니다. **추가 정보**를
+선택한 다음 **실행**을 선택하세요.
+
+직접 빌드하려면 Rust(stable, MSVC 툴체인)를 사용하세요.
 
 ```powershell
 git clone https://github.com/operonlab/flowseam
@@ -161,7 +168,7 @@ Mac은 TCP 포트 24800으로 접속합니다.
 - Windows PC는 제어받을 수만 있고 다른 컴퓨터를 제어할 수 없습니다.
 - 클립보드는 텍스트만 전달합니다. 이미지, 서식 있는 텍스트, 파일은 전달하지 않습니다.
 - Linux는 지원하지 않습니다.
-- Windows에는 설치 프로그램과 서명된 빌드가 없으므로 소스에서 빌드해야 합니다.
+- Windows에는 설치 프로그램이 없고 exe에도 서명이 없어 처음 실행할 때 SmartScreen이 경고합니다.
 - 컴퓨터는 입력한 주소로 찾으며, 로컬 네트워크에서의 자동 검색은 아직 지원하지 않습니다.
 
 ## 문제 해결

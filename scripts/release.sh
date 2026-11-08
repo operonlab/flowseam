@@ -1,13 +1,18 @@
 #!/bin/bash
-# Publish one Flowseam release: the public source, the signed macOS app on GitHub Releases, and the
-# Homebrew cask.
+# Publish one Flowseam release: the public source, the signed macOS app and the Windows exe on GitHub
+# Releases, and the Homebrew cask.
 #
-#   RELEASE_CHECK_DENY='<private names, as an extended regex>' scripts/release.sh <version> <notes.md> [ref]
+#   RELEASE_CHECK_DENY='<private names, as an extended regex>' WINDOWS_EXE=<flowseam.exe> \
+#     scripts/release.sh <version> <notes.md> [ref]
 #
 # Builds from a clean export of <ref> (default: local-main), never from a working tree. Nothing leaves this
 # machine until the private-name scan, the tests, the build and the signature check have all passed.
 # The private names come from the environment so they are never written into a public file.
 # RELEASE_TRAILER, if set, is appended to the public commit messages.
+#
+# The Windows exe is built on a Windows PC from the same <ref> (cargo build --release --locked -p flowseam)
+# and tested there; this script only checks and uploads it. <exe>.commit must hold the full commit id it was
+# built from, and that must be <ref>. WINDOWS_EXE=none publishes without it.
 set -u
 
 VER=${1:?usage: scripts/release.sh <version> <notes.md> [ref]}
@@ -23,6 +28,15 @@ fail() { echo "release: $*" >&2; exit 1; }
 [ -f "$NOTES" ] || fail "no notes file $NOTES"
 case "$VER" in [0-9]*.[0-9]*.[0-9]*) ;; *) fail "version must look like 0.1.0" ;; esac
 gh release view "v$VER" --repo "$REPO" > /dev/null 2>&1 && fail "v$VER is already released"
+
+WIN_EXE=${WINDOWS_EXE:?set WINDOWS_EXE to the Windows flowseam.exe built from $REF, or to none}
+if [ "$WIN_EXE" != none ]; then
+  [ -f "$WIN_EXE" ] || fail "no Windows exe at $WIN_EXE"
+  [ "$(head -c 2 "$WIN_EXE")" = MZ ] || fail "$WIN_EXE is not a Windows executable"
+  want=$(git -C "$ROOT" rev-parse --verify "$REF^{commit}") || fail "cannot resolve $REF"
+  built=$(cat "$WIN_EXE.commit" 2>/dev/null)
+  [ "$built" = "$want" ] || fail "$WIN_EXE was built from '${built:-?}', not $REF ($want); see $WIN_EXE.commit"
+fi
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/flowseam-release.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
@@ -62,7 +76,13 @@ git -C "$WORK/pub" tag "v$VER"
 git -C "$WORK/pub" push -q origin main "v$VER" || fail "push to $REPO failed"
 
 echo "release: uploading the app"
-gh release create "v$VER" "$ZIP" --repo "$REPO" --title "Flowseam $VER" --notes-file "$NOTES" || fail "GitHub release failed"
+ASSETS=("$ZIP")
+if [ "$WIN_EXE" != none ]; then
+  EXE=$WORK/Flowseam-$VER-windows-x64.exe
+  cp "$WIN_EXE" "$EXE" || fail "cannot copy $WIN_EXE"
+  ASSETS+=("$EXE")
+fi
+gh release create "v$VER" "${ASSETS[@]}" --repo "$REPO" --title "Flowseam $VER" --notes-file "$NOTES" || fail "GitHub release failed"
 
 echo "release: updating the cask"
 gh repo clone "$TAP" "$WORK/tap" -- -q || fail "cannot clone $TAP"

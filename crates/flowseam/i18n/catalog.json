@@ -54,6 +54,16 @@
     "ja": "相手のコンピュータでのMacキーの扱い",
     "ko": "상대 컴퓨터에서 Mac 키를 해석하는 방식"
   },
+  "Releases 頁面提供編譯好的 Windows 版，不必再從原始碼建置。": {
+    "en": "The Releases page has a ready-built Windows version, so there is no need to build it from source.",
+    "ja": "Releases ページにビルド済みの Windows 版があり、ソースからビルドする必要はなくなりました。",
+    "ko": "Releases 페이지에서 빌드된 Windows 버전을 받을 수 있어 소스에서 빌드할 필요가 없습니다."
+  },
+  "Windows 版可直接下載": {
+    "en": "Download the Windows version",
+    "ja": "Windows 版をダウンロード可能に",
+    "ko": "Windows 버전 다운로드"
+  },
   "chord {} 含空的片段": {
     "en": "Shortcut {} has an empty part",
     "ja": "ショートカット{}に空の部分があります",
@@ -103,6 +113,11 @@
     "en": "{}: {}",
     "ja": "{}：{}",
     "ko": "{}: {}"
+  },
+  "一台 Mac 操作另一台 Mac 時，把游標推到那台 Mac 通往下一台電腦的邊緣，就能接著操作下一台，例如經過 Mac mini 操作 Windows PC。只有中間那台 Mac 需要這一版。": {
+    "en": "While one Mac drives another, push the pointer to the edge that leads from that Mac to its next computer and carry on there, for example through a Mac mini to a Windows PC. Only the Mac in the middle needs this version.",
+    "ja": "Mac で別の Mac を操作しているとき、その Mac から次のコンピュータへ続く端までポインタを動かすと、そのまま次のコンピュータを操作できます。たとえば Mac mini を経由して Windows PC を操作できます。このバージョンが必要なのは間の Mac だけです。",
+    "ko": "Mac으로 다른 Mac을 제어하는 동안 그 Mac에서 다음 컴퓨터로 이어지는 가장자리까지 포인터를 밀면 다음 컴퓨터를 이어서 제어할 수 있습니다. 예를 들어 Mac mini를 거쳐 Windows PC를 제어할 수 있습니다. 이 버전은 가운데 Mac에만 필요합니다."
   },
   "上": {
     "en": "Top",
@@ -243,6 +258,16 @@
     "en": "Other computer’s IP address and port",
     "ja": "相手のIPアドレスとポート",
     "ko": "상대 컴퓨터의 IP 주소와 포트"
+  },
+  "另一台電腦操作接了多個螢幕的 Mac 時，游標現在能移到每一個螢幕。": {
+    "en": "When another computer drives a Mac with several screens, the pointer now reaches every screen.",
+    "ja": "複数のディスプレイをつないだ Mac を別のコンピュータから操作するとき、ポインタがすべてのディスプレイに移動できるようになりました。",
+    "ko": "여러 화면을 쓰는 Mac을 다른 컴퓨터에서 제어할 때 이제 포인터가 모든 화면으로 이동합니다."
+  },
+  "另一台電腦正在操作這台 Mac 時，動一下這台 Mac 的滑鼠或按一個鍵，就改由這台 Mac 操作。": {
+    "en": "While another computer drives this Mac, move this Mac's mouse or press a key on it, and this Mac takes over.",
+    "ja": "別のコンピュータがこの Mac を操作しているときに、この Mac のマウスを動かすかキーを押すと、この Mac が操作を引き継ぎます。",
+    "ko": "다른 컴퓨터가 이 Mac을 제어하는 동안 이 Mac의 마우스를 움직이거나 키를 누르면 이 Mac이 제어를 이어받습니다."
   },
   "可用 Homebrew 安裝：": {
     "en": "Install with Homebrew:",
@@ -709,6 +734,11 @@
     "ja": "現在のバージョン {}",
     "ko": "현재 버전 {}"
   },
+  "碰哪台就由哪台接手": {
+    "en": "The computer you touch takes over",
+    "ja": "触れたコンピュータが操作を引き継ぐ",
+    "ko": "만진 컴퓨터가 제어를 이어받음"
+  },
   "移除這台裝置": {
     "en": "Remove Device",
     "ja": "このデバイスを削除",
@@ -733,6 +763,11 @@
     "en": "Quit Flowseam",
     "ja": "Flowseam を終了",
     "ko": "Flowseam 종료"
+  },
+  "經過一台 Mac 控制下一台": {
+    "en": "Through one Mac to the next",
+    "ja": "Mac を経由して次のコンピュータへ",
+    "ko": "Mac을 거쳐 다음 컴퓨터로"
   },
   "總覽": {
     "en": "Overview",

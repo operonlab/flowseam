@@ -33,7 +33,8 @@ https://github.com/user-attachments/assets/be5499eb-c39a-4722-b87a-0203b3a30c64
 ## 他にない点
 
 - **意図したときだけ切り替わる。** 共有している画面の端にポインタを 200 ms 置くか、⌃⌥⌘S を押すと切り替わります。マウスボタンを押している間はポインタが元の画面にとどまるため、ウィンドウのドラッグやテキストの選択中に隣のコンピュータへ飛び出すことはありません。ファイルのドラッグだけは例外です。
-- **いつでも戻れる。** ⌃⌥⌘Esc を押すと、マウスとキーボードが Mac に戻ります。バックグラウンドのプロセスが固まった場合や、共有中に macOS が許可を取り消した場合も、入力はロックされたままにならず解放されます。
+- **Mac を経由して次のコンピュータへ。** MacBook で Mac mini を操作しているとき、その先の Windows PC までそのまま操作できます。間の Mac がポインタとキー入力を転送します。
+- **いつでも戻れる。** ⌃⌥⌘Esc を押すと、マウスとキーボードが Mac に戻ります。別のコンピュータが操作している Mac のマウスやキーボードに触れると、その Mac が操作を引き継ぎます。バックグラウンドのプロセスが固まった場合や、共有中に macOS が許可を取り消した場合も、入力はロックされたままにならず解放されます。
 - **Windows で使える Mac のショートカット。** ⌘C でコピー、⌘Tab でアプリの切り替え、⌥ を単独で押すとスタートが開きます。[キーとショートカット](#キーとショートカット)を参照してください。
 - **Mac 同士の最速接続。** 2 台の Mac が複数のネットワークでつながっている場合、Flowseam は最も速い経路を使います。Thunderbolt やイーサネットが Wi‑Fi より優先されます。
 - **プライバシー重視。** ペアリングは 6 桁のコードで 1 回だけ行います。以降の接続はすべて、ご自身のマシン同士の相互 TLS です。テレメトリはありません。[プライバシーとネットワーク](#プライバシーとネットワーク)を参照してください。
@@ -54,9 +55,9 @@ https://github.com/user-attachments/assets/be5499eb-c39a-4722-b87a-0203b3a30c64
 
 | | macOS 13 以降（Apple シリコンおよび Intel） | Windows 10 または 11 |
 |---|---|---|
-| 入手 | Homebrew、または [Releases](https://github.com/operonlab/flowseam/releases) の zip | ソースからビルド（インストーラはまだありません） |
+| 入手 | Homebrew、または [Releases](https://github.com/operonlab/flowseam/releases) の zip | [Releases](https://github.com/operonlab/flowseam/releases) の exe、またはソースからビルド（インストーラはまだありません） |
 | 許可 | アクセシビリティと入力監視 | 求められたら Windows ファイアウォール（TCP 24800） |
-| アップデート | `brew upgrade --cask flowseam` | 新しいバージョンをビルドして `flowseam.exe` を置き換える |
+| アップデート | `brew upgrade --cask flowseam` | 新しい exe をダウンロードして古いものと置き換える |
 
 ### macOS
 
@@ -71,7 +72,9 @@ Flowseam は独自の証明書で署名されており、Apple の公証は受�
 
 ### Windows
 
-Rust（stable、MSVC ツールチェーン）でビルドしてください。
+[Releases](https://github.com/operonlab/flowseam/releases) から `Flowseam-<version>-windows-x64.exe` をダウンロードし、専用のフォルダ（例: `%LOCALAPPDATA%\Programs\Flowseam`）に置いて実行してください。exe は署名されていないため、初回は Windows SmartScreen が「Windows によって PC が保護されました」と表示します。**詳細情報**を選び、**実行**を選んでください。
+
+自分でビルドする場合は、Rust（stable、MSVC ツールチェーン）を使います。
 
 ```powershell
 git clone https://github.com/operonlab/flowseam
@@ -142,7 +145,7 @@ Flowseam は設定ウィンドウを開き、トレイにアイコンを表示�
 - Windows PC は操作される側にはなれますが、他のコンピュータを操作することはできません。
 - クリップボードで扱えるのはテキストのみです。画像、リッチテキスト、ファイルは扱えません。
 - Linux には対応していません。
-- Windows にはインストーラも署名済みビルドもありません。ソースからビルドしてください。
+- Windows にはインストーラがなく、exe も署名されていません。初回の実行時に SmartScreen が警告します。
 - コンピュータは入力したアドレスで見つけます。ローカルネットワーク上の自動検出はまだありません。
 
 ## トラブルシューティング

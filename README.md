@@ -39,8 +39,11 @@ Files come back from it while a Mac drives it.
 - **Switch on purpose.** Rest the pointer at a shared edge for 200 ms, or press ⌃⌥⌘S. While a mouse button is
   held the pointer stays on its screen, so dragging a window or selecting text never lands on the next
   computer. Dragging files is the one exception.
-- **Always a way back.** ⌃⌥⌘Esc returns the mouse and keyboard to the Mac. If the background process hangs,
-  or macOS takes a permission away while sharing, input is released instead of staying locked.
+- **Through one Mac to the next.** A MacBook driving the Mac mini carries on through it to the Windows PC on
+  its far side: the Mac in the middle passes the pointer and keys along.
+- **Always a way back.** ⌃⌥⌘Esc returns the mouse and keyboard to the Mac. Touch the mouse or keyboard of a Mac
+  that another computer is driving, and that Mac takes over. If the background process hangs, or macOS takes a
+  permission away while sharing, input is released instead of staying locked.
 - **Mac shortcuts on Windows.** ⌘C copies, ⌘Tab switches apps, tapping ⌥ opens Start. See
   [Keys and shortcuts](#keys-and-shortcuts).
 - **The fastest link between Macs.** With more than one network between two Macs, Flowseam takes the
@@ -66,9 +69,9 @@ Files come back from it while a Mac drives it.
 
 | | macOS 13 or later (Apple silicon and Intel) | Windows 10 or 11 |
 |---|---|---|
-| Get it | Homebrew, or the zip from [Releases](https://github.com/operonlab/flowseam/releases) | Build from source (no installer yet) |
+| Get it | Homebrew, or the zip from [Releases](https://github.com/operonlab/flowseam/releases) | The exe from [Releases](https://github.com/operonlab/flowseam/releases), or build from source (no installer yet) |
 | Allow | Accessibility and Input Monitoring | Windows Firewall, when asked (TCP 24800) |
-| Update | `brew upgrade --cask flowseam` | Build the new version and replace `flowseam.exe` |
+| Update | `brew upgrade --cask flowseam` | Download the new exe and replace the old one |
 
 ### macOS
 
@@ -85,7 +88,11 @@ Privacy & Security and choose **Open Anyway**.
 
 ### Windows
 
-Build it with Rust (stable, MSVC toolchain):
+Download `Flowseam-<version>-windows-x64.exe` from [Releases](https://github.com/operonlab/flowseam/releases), keep it in a folder of its own
+(for example `%LOCALAPPDATA%\Programs\Flowseam`) and run it. The exe is not signed, so the first time Windows
+SmartScreen says "Windows protected your PC": choose **More info**, then **Run anyway**.
+
+To build it yourself instead, use Rust (stable, MSVC toolchain):
 
 ```powershell
 git clone https://github.com/operonlab/flowseam
@@ -161,7 +168,7 @@ The full table is in [`crates/flowseam-core/src/mac_shortcuts.rs`](crates/flowse
 - A Windows PC can be controlled but cannot control another computer.
 - The clipboard carries text only: no images, rich text or files.
 - No Linux support.
-- Windows has no installer or signed build; build it from source.
+- Windows has no installer, and its exe is not signed: SmartScreen warns the first time it runs.
 - Computers are found by the address you enter; there is no discovery on the local network yet.
 
 ## Troubleshooting

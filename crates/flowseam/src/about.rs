@@ -20,6 +20,12 @@ pub fn show_update_check() { UPDATE_CHECK_REQUESTED.store(true, AtomicOrdering::
 struct Note { icon: Icon, tint: Color32, title: &'static str, body: &'static str }
 struct Release { version: &'static str, items: &'static [Note] }
 const NOTES: &[Release] = &[
+    Release { version: "0.1.3", items: &[
+        Note { icon: Icon::Arrows, tint: BLUE, title: "經過一台 Mac 控制下一台", body: "一台 Mac 操作另一台 Mac 時，把游標推到那台 Mac 通往下一台電腦的邊緣，就能接著操作下一台，例如經過 Mac mini 操作 Windows PC。只有中間那台 Mac 需要這一版。" },
+        Note { icon: Icon::Sliders, tint: GREEN, title: "碰哪台就由哪台接手", body: "另一台電腦正在操作這台 Mac 時，動一下這台 Mac 的滑鼠或按一個鍵，就改由這台 Mac 操作。" },
+        Note { icon: Icon::Grid, tint: TEAL, title: "多螢幕 Mac 的修正", body: "另一台電腦操作接了多個螢幕的 Mac 時，游標現在能移到每一個螢幕。" },
+        Note { icon: Icon::Display, tint: PURPLE, title: "Windows 版可直接下載", body: "Releases 頁面提供編譯好的 Windows 版，不必再從原始碼建置。" },
+    ] },
     Release { version: "0.1.2", items: &[
         Note { icon: Icon::Display, tint: PURPLE, title: "在 Windows 上也能直接放進資料夾", body: "從 Mac 拖到 Windows 的檔案，可以直接放進資料夾、桌面或 App，不再一律存到「下載」。" },
         Note { icon: Icon::Arrows, tint: BLUE, title: "從 Windows 拖檔案回 Mac", body: "由 Mac 操作 Windows 時，在檔案總管把檔案拖到通往 Mac 的邊緣，就能放到 Mac 上想放的地方。Windows 上的檔案留在原處。" },

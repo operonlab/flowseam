@@ -1,5 +1,5 @@
-//! Two forwarders over a real pinned TLS link on 127.0.0.1: A hands the cursor to B,
-//! B receives the stream and injects it into its sink; B's return dwell hands it back.
+//! Forwarders over real pinned TLS links on 127.0.0.1: a driven machine can also relay
+//! its controller's input to its own peer, then resume injecting on return.
 
 use std::net::TcpListener;
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -67,6 +67,17 @@ struct Chan(Sender<Msg>);
 impl Outbox for Chan {
     fn send(&mut self, _peer: &str, msg: Msg) {
         self.0.send(msg).expect("link outgoing open");
+    }
+}
+
+struct Routes { a: Sender<Msg>, c: Sender<Msg> }
+impl Outbox for Routes {
+    fn send(&mut self, peer: &str, msg: Msg) {
+        match peer {
+            "a" => self.a.send(msg).expect("A link outgoing open"),
+            "c" => self.c.send(msg).expect("C link outgoing open"),
+            _ => panic!("unknown route {peer}"),
+        }
     }
 }
 
@@ -160,4 +171,113 @@ fn a_switches_out_b_injects_then_b_returns_the_cursor() {
     drop(b);
     join_within(server, 10).expect("server session");
     join_within(client, 10).expect("client session");
+}
+
+#[test]
+fn a_drives_b_through_c_then_c_returns_and_a_releases() {
+    let a_id = Identity::generate().unwrap();
+    let b_id = Identity::generate().unwrap();
+    let c_id = Identity::generate().unwrap();
+    let (a_info, b_info, c_info) = (info("a", &a_id), info("b", &b_id), info("c", &c_id));
+    let ab_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let bc_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let ab_addr = ab_listener.local_addr().unwrap();
+    let bc_addr = bc_listener.local_addr().unwrap();
+
+    let (a_out_tx, a_out_rx) = channel::<Msg>();
+    let (a_in_tx, a_in_rx) = channel::<Msg>();
+    let (b_a_out_tx, b_a_out_rx) = channel::<Msg>();
+    let (b_a_in_tx, b_a_in_rx) = channel::<Msg>();
+    let (b_c_out_tx, b_c_out_rx) = channel::<Msg>();
+    let (b_c_in_tx, b_c_in_rx) = channel::<Msg>();
+    let (c_out_tx, c_out_rx) = channel::<Msg>();
+    let (c_in_tx, c_in_rx) = channel::<Msg>();
+
+    let ab_server = {
+        let (id, me) = (b_id.clone(), b_info.clone());
+        let pins = PinSet::new([fingerprint(&a_id.cert_der)]);
+        thread::spawn(move || {
+            let ep = Endpoint { identity: &id, pins: &pins, me: &me, timing: timing(), speak_for: None, paths_for: None };
+            link::serve_once(&ab_listener, &ep, &b_a_out_rx, &b_a_in_tx)
+        })
+    };
+    let ab_client = {
+        let (id, me) = (a_id.clone(), a_info);
+        let pins = PinSet::new([fingerprint(&b_id.cert_der)]);
+        thread::spawn(move || {
+            let ep = Endpoint { identity: &id, pins: &pins, me: &me, timing: timing(), speak_for: None, paths_for: None };
+            link::run_client_once(ab_addr, &ep, &a_out_rx, &a_in_tx)
+        })
+    };
+    let bc_server = {
+        let (id, me) = (c_id.clone(), c_info);
+        let pins = PinSet::new([fingerprint(&b_id.cert_der)]);
+        thread::spawn(move || {
+            let ep = Endpoint { identity: &id, pins: &pins, me: &me, timing: timing(), speak_for: None, paths_for: None };
+            link::serve_once(&bc_listener, &ep, &c_out_rx, &c_in_tx)
+        })
+    };
+    let bc_client = {
+        let (id, me) = (b_id.clone(), b_info);
+        let pins = PinSet::new([fingerprint(&c_id.cert_der)]);
+        thread::spawn(move || {
+            let ep = Endpoint { identity: &id, pins: &pins, me: &me, timing: timing(), speak_for: None, paths_for: None };
+            link::run_client_once(bc_addr, &ep, &b_c_out_rx, &b_c_in_tx)
+        })
+    };
+
+    let screen = vec![Rect { x: 0, y: 0, w: 1440, h: 900 }];
+    let mut b_cfg = cfg("a", Edge::Left);
+    b_cfg.peers.push(PeerSpec { name: "c".into(), edge: Edge::Right, keys: flowseam_core::config::KeyMap::None });
+    let mut a = Forwarder::new(cfg("b", Edge::Right), screen.clone(), Rec::default(), Chan(a_out_tx));
+    let mut b = Forwarder::new(b_cfg, screen.clone(), Rec::default(), Routes { a: b_a_out_tx, c: b_c_out_tx });
+    let mut c = Forwarder::new(cfg("b", Edge::Left), screen, Rec::default(), Chan(c_out_tx));
+    a.link_up("b");
+    b.link_up("a");
+    b.link_up("c");
+    c.link_up("b");
+
+    let edge = Point { x: 1439, y: 450 };
+    a.on_cursor(edge, 0);
+    a.on_cursor(edge, 200);
+    b.on_msg("a", recv(&b_a_in_rx), 300);
+    assert!(matches!(b.mode(), Mode::RemoteIn { .. }));
+    a.on_captured(CapturedEvent::Motion { dx: 2000, dy: 0 }, 1000);
+    b.on_msg("a", recv(&b_a_in_rx), 1000);
+    b.tick(1200);
+    assert!(matches!(b.mode(), Mode::Relay { from, to, .. } if from == "a" && to == "c"));
+    c.on_msg("b", recv(&c_in_rx), 1200);
+    assert!(matches!(c.mode(), Mode::RemoteIn { .. }));
+
+    a.on_captured(CapturedEvent::Motion { dx: 7, dy: -3 }, 1300);
+    a.on_captured(CapturedEvent::Key { hid: 0x04, down: true }, 1300);
+    for _ in 0..2 { b.on_msg("a", recv(&b_a_in_rx), 1300); }
+    for _ in 0..2 { c.on_msg("b", recv(&c_in_rx), 1300); }
+    assert!(c.sink().0.contains(&"motion 7 -3".into()));
+    assert!(c.sink().0.contains(&"key 4 true".into()));
+    assert!(!b.sink().0.contains(&"key 4 true".into()));
+
+    a.on_captured(CapturedEvent::Motion { dx: -200, dy: 0 }, 1400);
+    b.on_msg("a", recv(&b_a_in_rx), 1400);
+    c.on_msg("b", recv(&c_in_rx), 1400);
+    c.tick(1600);
+    assert!(matches!(c.mode(), Mode::Local));
+    b.on_msg("c", recv(&b_c_in_rx), 1600);
+    assert!(matches!(b.mode(), Mode::RemoteIn { peer, .. } if peer == "a"));
+
+    for hid in [0xE0, 0xE2, 0xE3, 0x16] {
+        a.on_captured(CapturedEvent::Key { hid, down: true }, 1700);
+    }
+    for _ in 0..4 { b.on_msg("a", recv(&b_a_in_rx), 1700); }
+    assert!(matches!(a.mode(), Mode::Local));
+    assert!(matches!(b.mode(), Mode::Local));
+    assert!(matches!(c.mode(), Mode::Local));
+
+    drop(a);
+    drop(b);
+    drop(c);
+    for handle in [ab_server, ab_client, bc_server, bc_client] {
+        join_within(handle, 10).expect("link session");
+    }
+    drop(a_in_rx);
 }
