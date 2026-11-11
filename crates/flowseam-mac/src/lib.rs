@@ -1,13 +1,16 @@
 //! flowseam_mac: macOS platform backend (design §4–§5). Implements flowseam_core's
 //! `InputBackend` over CGEventTap / CGEventPost / CGDisplay*.
 //!
-//! Pure logic (`keymap`, `state`) compiles everywhere and runs without OS
+//! Pure logic (`keymap`, `state`, `gesture`) compiles everywhere and runs without OS
 //! permissions. Everything that touches the OS is macOS-only.
 
+pub mod ddc;
 pub mod front;
+pub mod gesture;
 pub mod grab;
 pub mod inject_mark;
 pub mod keymap;
+pub mod kvm;
 #[cfg(target_os = "macos")]
 pub mod links;
 pub mod sink;
@@ -19,6 +22,8 @@ pub mod switch_gate;
 mod ffi;
 #[cfg(target_os = "macos")]
 mod heartbeat;
+#[cfg(target_os = "macos")]
+mod signal_pipe;
 #[cfg(target_os = "macos")]
 mod ifaces;
 #[cfg(target_os = "macos")]

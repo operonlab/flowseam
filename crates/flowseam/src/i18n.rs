@@ -146,10 +146,7 @@ fn with_language(text: &str, lang: Option<Lang>) -> String {
     out.join("\n") + "\n"
 }
 pub fn save_prefs(path: &Path, lang: Option<Lang>) -> std::io::Result<()> {
-    if let Some(dir) = path.parent() { std::fs::create_dir_all(dir)?; }
-    let text = match std::fs::read_to_string(path) { Ok(t) => t, Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(), Err(e) => return Err(e) };
-    std::fs::write(path, with_language(&text, lang))?;
-    Ok(())
+    crate::ui_prefs::write_shared(path, |text| with_language(text, lang))
 }
 
 #[cfg(test)]
@@ -205,7 +202,7 @@ mod tests {
                 assert_eq!(key.matches("{}").count(), translation.matches("{}").count(), "{key:?} {lang}");
             }
         }
-        let sources = [include_str!("gui.rs"), include_str!("model.rs"), include_str!("about.rs"), include_str!("autostart.rs"), include_str!("menubar.rs")].join("\n");
+        let sources = [include_str!("gui.rs"), include_str!("model.rs"), include_str!("about.rs"), include_str!("autostart.rs"), include_str!("menubar.rs"), include_str!("kvm_ui.rs")].join("\n");
         let re = regex::Regex::new(r#"\b(?:tr|trf)\("((?:[^"\\]|\\.)*)""#).unwrap();
         let mut used: std::collections::HashSet<_> = re.captures_iter(&sources).map(|c| c[1].to_owned()).collect();
         let page_re = regex::Regex::new(r#"\(Page::\w+, "([^"]+)""#).unwrap();

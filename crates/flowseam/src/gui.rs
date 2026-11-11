@@ -1,13 +1,16 @@
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Align, Color32, CornerRadius, FontFamily, FontId, Layout, Margin, RichText, Sense, Stroke, StrokeKind};
-use flowseam_core::config::{Config, Edge, KeyMap};
+use flowseam_core::config::{Config, Edge, GestureMap, KeyMap};
+use flowseam_core::gesture::Habit;
 use flowseam_core::proto::Kind;
-use flowseam_core::status::{self, LinkStatus};
+use flowseam_core::status::{self, KvmPhase, KvmStatus, LinkStatus};
 
-use crate::model::{chord_symbols, edge_label, fingerprint_short, keys_label, role, PeerRow, UiState, EDGES, KEY_MAPS};
+use crate::model::{chord_symbols, chosen, edge_label, fingerprint_short, habit_label, keys_label, role, PeerRow, UiState, EDGES, KEY_MAPS};
 use crate::worker::{WorkerHandle, WorkerStatus};
 
 // Apple system colors, dark-mode variants where they differ (systemGreen / Orange / Red / Purple / Gray).
@@ -27,6 +30,180 @@ pub(crate) fn liveness(worker_running: bool, status: Option<&LinkStatus>, now_ms
         Some(p) if p.up => (match p.kind { Some(Kind::Wired) => crate::i18n::tr("連線中 · 有線"), Some(Kind::WiFi) => crate::i18n::tr("連線中 · Wi‑Fi"), _ => crate::i18n::tr("連線中") }.into(), GREEN),
         Some(p) => (p.reason.as_ref().map_or_else(|| crate::i18n::tr("未連線").into(), |r| crate::i18n::trf("未連線 · {}", &[&crate::i18n::tr_runtime(r)])), ORANGE),
         None => (crate::i18n::tr("未連線").into(), ORANGE),
+    }
+}
+
+/// How long a sent test may go without a result before the window says it did not start: the 8 s it shows
+/// the input, plus two returns of 12 one-second readbacks each, plus slack.
+#[cfg(target_os = "macos")]
+const KVM_TEST_WAIT: Duration = Duration::from_secs(40);
+
+/// What a peer card's monitor rows asked for, done after the card loop has let go of the peers.
+#[cfg(target_os = "macos")]
+enum KvmAction {
+    Inspect(String),
+    /// Test these monitors of the peer, together.
+    Test(String, Vec<flowseam_core::config::DisplaySwitch>),
+}
+
+/// A paired peer's monitors: which of them switch with it, which input of each shows the peer and which
+/// shows this Mac, and the test that confirms each. Only a person can confirm: DDC says which input a
+/// monitor shows, not what is plugged into it.
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+fn monitor_rows(ui: &mut egui::Ui, th: Theme, i: usize, p: &mut PeerRow, connected: &[(String, String)], names: &std::collections::BTreeMap<String, String>, inspects: &std::collections::HashMap<String, status::InspectStatus>, kvm: Option<&KvmStatus>, running: bool, messages: &[(String, String, String)], action: &mut Option<KvmAction>) {
+    use flowseam_mac::ddc::input_name;
+    let tr = crate::i18n::tr;
+    let idle = running && kvm.is_some_and(|k| k.phase == KvmPhase::Idle);
+    let testing = kvm.is_some_and(|k| k.phase == KvmPhase::Testing);
+    row(ui, th, false, tr("螢幕切換"), Some(tr("切到這台時，一起切換的螢幕")), |ui| {
+        let free: Vec<&(String, String)> = connected.iter().filter(|(u, _)| !p.displays.iter().any(|d| &d.uuid == u)).collect();
+        let mut pick = None;
+        ui.add_enabled_ui(!free.is_empty(), |ui| {
+            egui::ComboBox::from_id_salt(("add-monitor", i)).selected_text(tr("＋ 加入螢幕")).width(210.0).show_ui(ui, |ui| {
+                for (u, n) in &free {
+                    if ui.selectable_label(false, n.as_str()).clicked() {
+                        pick = Some(u.clone());
+                    }
+                }
+            });
+        });
+        if let Some(u) = pick {
+            crate::kvm_ui::add_monitor(&mut p.displays, &u);
+            *action = Some(KvmAction::Inspect(u));
+        }
+        // With two or more, one test shows them all at once instead of one after another.
+        if p.displays.len() >= 2 && !testing {
+            let batch = crate::kvm_ui::to_test(&p.displays);
+            if ui.add_enabled(idle && !batch.is_empty(), egui::Button::new(tr("全部測試"))).on_hover_text(tr("還沒確認的螢幕一起切過去測試；都確認過了就全部重測")).clicked() {
+                *action = Some(KvmAction::Test(p.name.clone(), batch));
+            }
+        }
+    });
+    let mut remove = None;
+    for (j, d) in p.displays.iter_mut().enumerate() {
+        let name = names.get(&d.uuid).cloned().unwrap_or_else(|| d.uuid.clone());
+        let inspect = inspects.get(&d.uuid);
+        let note = messages.iter().find(|(peer, uuid, _)| *peer == p.name && *uuid == d.uuid).map(|(_, _, m)| m.as_str());
+        row(ui, th, false, &name, note, |ui| {
+            if ui.add(egui::Button::new(RichText::new(tr("移除")).color(RED)).frame(false)).clicked() {
+                remove = Some(j);
+            }
+            if d.verified {
+                badge(ui, tr("已確認"), GREEN);
+            } else {
+                badge(ui, tr("尚未確認"), ORANGE);
+            }
+            if testing {
+                ui.label(tr("測試中…"));
+            } else if ui.add_enabled(idle && crate::kvm_ui::testable(d), egui::Button::new(tr("測試"))).on_hover_text(tr("切過去看一眼，確認那個輸入接的就是這台")).clicked() {
+                *action = Some(KvmAction::Test(p.name.clone(), vec![d.clone()]));
+            }
+        });
+        let listed: Vec<u16> = inspect.map(|s| s.inputs.iter().flatten().copied().collect()).unwrap_or_default();
+        row(ui, th, false, tr("對方用的輸入"), Some(tr("這台電腦接在螢幕的哪個輸入")), |ui| match inspect {
+            None if !running => {
+                ui.label(RichText::new(tr("開啟共用後才能讀取螢幕")).color(th.text2));
+            }
+            None => {
+                ui.label(RichText::new(tr("讀取螢幕的輸入…")).color(th.text2));
+            }
+            Some(s) => {
+                if ui.small_button(tr("重新讀取")).clicked() {
+                    *action = Some(KvmAction::Inspect(d.uuid.clone()));
+                }
+                let inputs = crate::kvm_ui::peer_inputs(s, d.home);
+                if listed.is_empty() {
+                    ui.label(RichText::new(s.reason.clone().unwrap_or_else(|| tr("螢幕沒有列出它的輸入").into())).color(ORANGE));
+                } else if d.home == 0 {
+                    ui.label(RichText::new(tr("先選這台 Mac 用的輸入")).color(th.text2));
+                } else {
+                    let mut picked = d.input;
+                    egui::ComboBox::from_id_salt(("input", i, j)).selected_text(if d.input == 0 { "—".to_string() } else { input_name(d.input) }).width(150.0).show_ui(ui, |ui| {
+                        for v in &inputs {
+                            ui.selectable_value(&mut picked, *v, input_name(*v));
+                        }
+                    });
+                    crate::kvm_ui::choose_input(d, picked);
+                }
+            }
+        });
+        // The input showing now is read as this Mac's; a monitor that could not say is set by hand here.
+        if !listed.is_empty() {
+            let unread = inspect.is_some_and(|s| s.current.is_none());
+            row(ui, th, false, tr("這台 Mac 用的輸入"), unread.then(|| tr("螢幕沒有回報目前的輸入，請自己選")), |ui| {
+                let mut picked = d.home;
+                egui::ComboBox::from_id_salt(("home", i, j)).selected_text(if d.home == 0 { "—".to_string() } else { input_name(d.home) }).width(150.0).show_ui(ui, |ui| {
+                    for v in &listed {
+                        ui.selectable_value(&mut picked, *v, input_name(*v));
+                    }
+                });
+                crate::kvm_ui::choose_home(d, picked);
+            });
+        }
+    }
+    if let Some(j) = remove {
+        p.displays.remove(j);
+    }
+}
+
+/// The peer's link is up in a status fresh enough for `liveness` to trust.
+fn peer_up(status: Option<&LinkStatus>, now_ms: u64, peer: &str) -> bool {
+    status.filter(|s| now_ms.saturating_sub(s.written_ms) <= 3000 && s.written_ms <= now_ms).is_some_and(|s| s.peers.iter().any(|p| p.name == peer && p.up))
+}
+
+/// Who drives this machine, from a status fresh enough to trust, while this window's worker runs.
+fn driven_by(running: bool, status: Option<&LinkStatus>, now_ms: u64) -> Option<String> {
+    status.filter(|s| running && now_ms.saturating_sub(s.written_ms) <= 3000 && s.written_ms <= now_ms).and_then(|s| s.driven_by.clone())
+}
+
+/// Who the "back" button hands control to. A driven machine shows it whenever sharing runs, not only while
+/// it is driven: the button also asks the controller to bring its monitors home, and a monitor can be left
+/// showing this machine while nobody drives it (the controller restarted, or the monitor switched by itself).
+fn back_to(role: crate::model::Role, running: bool, driven_by: Option<String>, first_peer: Option<&str>) -> Option<String> {
+    driven_by.or_else(|| (role == crate::model::Role::Driven && running).then(|| first_peer.map(str::to_string)).flatten())
+}
+
+/// A connected peer's tray lines, from what the running worker reports rather than the unsaved form: its
+/// button, a tick box for each monitor the worker has for it, and a note when the form has monitors the
+/// worker has not loaded. The button switches monitors only when a ticked one can switch: the same rule,
+/// `switch_blocked`, the worker refuses by.
+fn peer_menu(kvm: Option<&KvmStatus>, peer: &str, edited: bool, name_of: &dyn Fn(&str) -> String, skips: &std::collections::BTreeSet<(String, String)>) -> (Option<crate::menubar::Button>, Vec<crate::menubar::MenuMonitor>, Option<String>) {
+    use flowseam_core::status::Blocked;
+    let (tr, trf) = (crate::i18n::tr, crate::i18n::trf);
+    let states: Vec<&status::MonitorState> = kvm.map(|k| k.monitors.iter().filter(|m| m.peer == peer).collect()).unwrap_or_default();
+    let monitors: Vec<crate::menubar::MenuMonitor> = states
+        .iter()
+        .map(|m| {
+            let name = name_of(&m.uuid);
+            let why = m.blocked().map(|b| match b {
+                Blocked::NotChecked => tr("正在檢查螢幕…").to_string(),
+                Blocked::Problem(r) => trf("不能切換：{}", &[&r]),
+                Blocked::Unknown(r) => trf("無法確認：{}", &[&r]),
+            });
+            // Untested, it still switches; the label says nobody vouched for its input.
+            let shown = if m.verified { name.clone() } else { trf("{}（未確認）", &[&name]) };
+            crate::menubar::MenuMonitor {
+                uuid: m.uuid.clone(),
+                label: why.as_ref().map_or_else(|| shown.clone(), |w| trf("{}：{}", &[&name, w])),
+                ticked: !skips.contains(&(peer.to_string(), m.uuid.clone())),
+                usable: why.is_none(),
+            }
+        })
+        .collect();
+    let switches = monitors.iter().any(|m| m.ticked && m.usable);
+    let note = (states.is_empty() && edited).then(|| tr("儲存設定後才會切換螢幕").to_string());
+    (switch_button(kvm, peer, switches), monitors, note)
+}
+
+/// The tray button for a connected peer, given the running worker's monitor state. While monitors are
+/// moving only that peer shows it; while they are out, nothing here can be clicked anyway.
+fn switch_button(kvm: Option<&KvmStatus>, peer: &str, has_display: bool) -> Option<crate::menubar::Button> {
+    use crate::menubar::Button;
+    match kvm.map(|k| (k.phase, k.peer.as_deref())) {
+        Some((KvmPhase::Switching | KvmPhase::Returning, at)) => (at == Some(peer)).then_some(Button::Busy),
+        Some((KvmPhase::Away, _)) => None,
+        _ => Some(if has_display { Button::InputAndDisplay } else { Button::Input }),
     }
 }
 
@@ -92,7 +269,87 @@ mod liveness_tests {
     use flowseam_core::status::PeerStatus;
 
     fn status(up: bool, kind: Option<Kind>, reason: Option<&str>) -> LinkStatus {
-        LinkStatus { written_ms: 10_000, peers: vec![PeerStatus { name: "Mac".into(), up, kind, remote: None, since_ms: 9_000, reason: reason.map(str::to_string) }] }
+        LinkStatus { written_ms: 10_000, peers: vec![PeerStatus { name: "Mac".into(), up, kind, remote: None, since_ms: 9_000, reason: reason.map(str::to_string) }], driven_by: None }
+    }
+
+    #[test]
+    fn a_switch_button_needs_a_fresh_up_link() {
+        assert!(peer_up(Some(&status(true, None, None)), 10_000, "Mac"));
+        assert!(!peer_up(Some(&status(false, None, None)), 10_000, "Mac"));
+        assert!(!peer_up(Some(&status(true, None, None)), 20_000, "Mac"), "stale status");
+        assert!(!peer_up(None, 10_000, "Mac"));
+    }
+
+    #[test]
+    fn the_back_button_needs_a_running_worker_and_a_fresh_status() {
+        let s = LinkStatus { driven_by: Some("mini".into()), ..status(true, None, None) };
+        assert_eq!(driven_by(true, Some(&s), 10_000).as_deref(), Some("mini"));
+        assert_eq!(driven_by(false, Some(&s), 10_000), None);
+        assert_eq!(driven_by(true, Some(&s), 20_000), None, "stale status");
+        assert_eq!(driven_by(true, Some(&status(true, None, None)), 10_000), None);
+    }
+
+    #[test]
+    fn a_monitor_is_offered_only_when_the_worker_has_it_checked_usable() {
+        use crate::menubar::Button;
+        use flowseam_core::status::{CheckState, MonitorCheck, MonitorState};
+        let state = |uuid: &str, check: Option<CheckState>, verified: bool| MonitorState {
+            peer: "pc".into(),
+            uuid: uuid.into(),
+            verified,
+            check: check.map(|state| MonitorCheck { peer: "pc".into(), state, reason: Some("why".into()) }),
+            peer_sees: None,
+        };
+        let worker = |monitors| KvmStatus { written_ms: 1, monitors, ..Default::default() };
+        let name = |u: &str| format!("M-{u}");
+        let none = std::collections::BTreeSet::new();
+        assert_eq!(peer_menu(None, "pc", false, &name, &none), (Some(Button::Input), vec![], None), "no monitor configured");
+
+        let both = worker(vec![state("U", Some(CheckState::Ok), true), state("V", Some(CheckState::Ok), true)]);
+        let (button, monitors, note) = peer_menu(Some(&both), "pc", true, &name, &none);
+        assert_eq!((button, note), (Some(Button::InputAndDisplay), None));
+        assert_eq!(monitors.iter().map(|m| (m.label.as_str(), m.ticked, m.usable)).collect::<Vec<_>>(), [("M-U", true, true), ("M-V", true, true)], "every monitor ticked until unticked");
+
+        let skip_u: std::collections::BTreeSet<_> = [("pc".to_string(), "U".to_string())].into();
+        let (button, monitors, _) = peer_menu(Some(&both), "pc", true, &name, &skip_u);
+        assert_eq!((button, monitors[0].ticked, monitors[1].ticked), (Some(Button::InputAndDisplay), false, true));
+        let skip_both: std::collections::BTreeSet<_> = [("pc".to_string(), "U".to_string()), ("pc".to_string(), "V".to_string())].into();
+        assert_eq!(peer_menu(Some(&both), "pc", true, &name, &skip_both).0, Some(Button::Input), "nothing ticked: keyboard and mouse only");
+
+        let unconfirmed = worker(vec![state("U", Some(CheckState::Ok), false)]);
+        let (button, monitors, _) = peer_menu(Some(&unconfirmed), "pc", true, &name, &none);
+        assert_eq!((button, monitors[0].usable), (Some(Button::InputAndDisplay), true), "untested, it switches too");
+        assert!(monitors[0].label.starts_with("M-U") && monitors[0].label != "M-U", "but the box says it is unconfirmed: {}", monitors[0].label);
+        let problem = worker(vec![state("U", Some(CheckState::Problem), true)]);
+        assert!(peer_menu(Some(&problem), "pc", true, &name, &none).1[0].label.contains("why"));
+        let unchecked = worker(vec![state("U", None, true)]);
+        assert_eq!(peer_menu(Some(&unchecked), "pc", true, &name, &none).0, Some(Button::Input), "not checked yet");
+        let (button, _, note) = peer_menu(Some(&worker(vec![])), "pc", true, &name, &none);
+        assert_eq!((button, note.is_some()), (Some(Button::Input), true), "monitors only in the unsaved form are not offered");
+        let other = worker(vec![MonitorState { peer: "air".into(), ..state("U", Some(CheckState::Ok), true) }]);
+        assert_eq!(peer_menu(Some(&other), "pc", false, &name, &none).1, vec![], "another peer's monitor");
+    }
+
+    #[test]
+    fn a_driven_machine_always_has_a_way_back_and_a_controller_only_while_driven() {
+        use crate::model::Role;
+        assert_eq!(back_to(Role::Driven, true, None, Some("mini")).as_deref(), Some("mini"), "nobody drives it, but a monitor may still show it");
+        assert_eq!(back_to(Role::Driven, true, Some("mac".into()), Some("mini")).as_deref(), Some("mac"), "the one driving it now");
+        assert_eq!(back_to(Role::Driven, false, None, Some("mini")), None, "sharing off: nothing to ask");
+        assert_eq!(back_to(Role::Driven, true, None, None), None, "no peer configured");
+        assert_eq!(back_to(Role::Controller, true, None, Some("pc")), None);
+        assert_eq!(back_to(Role::Controller, true, Some("mbp".into()), Some("pc")).as_deref(), Some("mbp"));
+    }
+
+    #[test]
+    fn the_switch_button_follows_the_monitor_state() {
+        use crate::menubar::Button;
+        let k = |phase, peer: Option<&str>| KvmStatus { written_ms: 1, phase, peer: peer.map(str::to_string), ..Default::default() };
+        assert_eq!(switch_button(None, "pc", true), Some(Button::InputAndDisplay));
+        assert_eq!(switch_button(Some(&k(KvmPhase::Idle, None)), "pc", false), Some(Button::Input));
+        assert_eq!(switch_button(Some(&k(KvmPhase::Switching, Some("pc"))), "pc", true), Some(Button::Busy));
+        assert_eq!(switch_button(Some(&k(KvmPhase::Returning, Some("pc"))), "air", true), None, "another peer waits");
+        assert_eq!(switch_button(Some(&k(KvmPhase::Away, Some("pc"))), "pc", true), None);
     }
 
     #[test]
@@ -185,6 +442,20 @@ impl Theme {
 }
 
 pub fn run(hidden: bool) -> i32 {
+    let dir = crate::config_dir();
+    let _instance = match crate::single::claim(&dir) {
+        Ok(crate::single::Start::First(guard)) => Some(guard),
+        // A hidden start (at login) has nothing to show; an open by hand asks the running one for its window, and
+        // carries on itself if that one was just quitting.
+        Ok(crate::single::Start::Second) if hidden => { eprintln!("flowseam: another Flowseam is already running; this one exits"); return 0; }
+        Ok(crate::single::Start::Second) => match crate::single::hand_over(&dir, Duration::from_secs(3)) {
+            Ok(Some(guard)) => Some(guard),
+            Ok(None) => { eprintln!("flowseam: asked the running Flowseam for its window; this one exits"); return 0; }
+            Err(e) => { eprintln!("flowseam: could not ask the running Flowseam for its window ({e}); this one exits"); return 0; }
+        },
+        Err(e) => { eprintln!("flowseam: could not check for another Flowseam ({e}); starting anyway"); None }
+    };
+    let ui_prefs = crate::ui_prefs::load();
     let viewport = egui::ViewportBuilder::default()
         .with_inner_size([860.0, 620.0])
         .with_min_inner_size([760.0, 520.0])
@@ -208,6 +479,8 @@ pub fn run(hidden: bool) -> i32 {
         viewport,
         ..Default::default()
     };
+    #[cfg(target_os = "macos")]
+    if hidden { opts.event_loop_builder = Some(Box::new(|builder| { use winit::platform::macos::EventLoopBuilderExtMacOS; builder.with_activate_ignoring_other_apps(false); })); }
     #[cfg(windows)]
     {
         opts.renderer = eframe::Renderer::Wgpu;
@@ -231,7 +504,8 @@ pub fn run(hidden: bool) -> i32 {
         opts,
         Box::new(|cc| {
             setup(&cc.egui_ctx);
-            Ok(Box::new(App::new(crate::menubar::MenuBar::new(hidden))))
+            crate::menubar::install_repaint_context(&cc.egui_ctx);
+            Ok(Box::new(App::new(crate::menubar::MenuBar::new(hidden, &ui_prefs), ui_prefs)))
         }),
     );
     match started {
@@ -308,18 +582,99 @@ fn font_candidates() -> Vec<(&'static str, Option<std::path::PathBuf>, u32, Font
     }
 }
 
+#[cfg(target_os = "macos")]
+fn map_font(path: &Path) -> std::io::Result<&'static [u8]> {
+    use std::os::fd::AsRawFd;
+    let file = std::fs::File::open(path)?;
+    let len = usize::try_from(file.metadata()?.len()).map_err(std::io::Error::other)?;
+    if len == 0 { return Err(std::io::Error::other("empty font file")); }
+    // SAFETY: read-only private mapping stays valid after the descriptor closes; fonts live until process exit.
+    // Assumes the file is never truncated in place (a read past the new end would fault): system fonts sit on the
+    // read-only system volume, and a font asset update writes a new file rather than rewriting this one.
+    let ptr = unsafe { libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ, libc::MAP_PRIVATE, file.as_raw_fd(), 0) };
+    if ptr == libc::MAP_FAILED { return Err(std::io::Error::last_os_error()); }
+    // SAFETY: mmap returned a valid region of len bytes, which we intentionally never unmap.
+    Ok(unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), len) })
+}
+
+fn load_font_once(
+    path: &Path,
+    cache: &mut HashMap<PathBuf, egui::FontData>,
+    map: impl FnOnce(&Path) -> std::io::Result<&'static [u8]>,
+) -> std::io::Result<egui::FontData> {
+    if let Some(data) = cache.get(path) { return Ok(data.clone()); }
+    let data = match map(path) {
+        Ok(bytes) => egui::FontData::from_static(bytes),
+        Err(map_error) => {
+            #[cfg(target_os = "macos")]
+            eprintln!("flowseam: font {} mmap failed ({map_error}); reading into memory", path.display());
+            #[cfg(not(target_os = "macos"))]
+            let _ = map_error;
+            egui::FontData::from_owned(std::fs::read(path)?)
+        }
+    };
+    cache.insert(path.to_owned(), data.clone());
+    Ok(data)
+}
+
+/// Hidden with nothing finishing, once a second is enough: worker supervision runs at that rate, and clicks and
+/// a reopen wake the loop at once. A quit, stop, restart or settings apply under way keeps the short cadence, so it
+/// completes as fast as before.
+fn repaint_interval(hidden: bool, settling: bool) -> Duration { if hidden && !settling { Duration::from_secs(1) } else { Duration::from_millis(200) } }
+
+#[cfg(test)]
+mod font_loading_tests {
+    use super::*;
+
+    #[test]
+    fn repeated_path_uses_one_mapping() {
+        let mut cache = HashMap::new();
+        let path = Path::new("same-font.ttc");
+        let first = load_font_once(path, &mut cache, |_| Ok(b"font bytes")).unwrap();
+        let second = load_font_once(path, &mut cache, |_| panic!("same path was loaded twice")).unwrap();
+        assert!(Arc::ptr_eq(&first.font, &second.font));
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn failed_mapping_reads_file_and_missing_file_reports_error() {
+        let path = std::env::temp_dir().join(format!("flowseam-font-fallback-{}", std::process::id()));
+        std::fs::write(&path, b"fallback bytes").unwrap();
+        let mut cache = HashMap::new();
+        let data = load_font_once(&path, &mut cache, |_| Err(std::io::Error::other("map failed"))).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(data.bytes(), b"fallback bytes");
+        assert!(load_font_once(&path, &mut cache, |_| Err(std::io::Error::other("map failed"))).is_ok(), "cached data remains available");
+        let mut empty_cache = HashMap::new();
+        assert!(load_font_once(&path, &mut empty_cache, |_| Err(std::io::Error::other("map failed"))).is_err());
+    }
+
+    #[test]
+    fn hidden_frame_interval_is_one_second() {
+        assert_eq!(repaint_interval(false, false), Duration::from_millis(200));
+        assert_eq!(repaint_interval(true, false), Duration::from_secs(1));
+        assert_eq!(repaint_interval(true, true), Duration::from_millis(200), "a quit or restart under way finishes at the short cadence");
+        assert_eq!(repaint_interval(false, true), Duration::from_millis(200));
+    }
+}
+
 fn setup(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     let faces = font_candidates();
+    let mut cache = HashMap::new();
     let mut order: Vec<(FontFamily, String)> = Vec::new();
     for (name, path, index, family) in faces {
         let Some(path) = path else {
             eprintln!("flowseam: PingFang not found; Chinese text uses the system fallback font");
             continue;
         };
-        match std::fs::read(&path) {
-            Ok(bytes) => {
-                let mut data = egui::FontData::from_owned(bytes);
+        match load_font_once(&path, &mut cache, |path| {
+            #[cfg(target_os = "macos")]
+            { map_font(path) }
+            #[cfg(not(target_os = "macos"))]
+            { let _ = path; Err(std::io::Error::other("mapping unavailable")) }
+        }) {
+            Ok(mut data) => {
                 data.index = index;
                 fonts.font_data.insert(name.into(), Arc::new(data));
                 order.push((family, name.into()));
@@ -468,7 +823,14 @@ enum PairEvent {
 struct App {
     about: crate::about::About,
     menubar: crate::menubar::MenuBar,
+    ui_prefs: crate::ui_prefs::UiPrefs,
+    update_check: crate::update_check::Checker,
     quitting: bool,
+    /// Another window process asked for the window (see `single`).
+    show_requested: bool,
+    /// eframe shows the window once the first frame is painted, whatever the builder said; a hidden start hides it
+    /// again from that frame's viewport commands, which eframe applies after its own show.
+    first_frame: bool,
     page: Page,
     autostart: Option<crate::autostart::State>,
     autostart_error: Option<String>,
@@ -491,6 +853,42 @@ struct App {
     auto_restarted: bool,
     watchdog_killed: bool,
     link_status: Option<LinkStatus>,
+    /// The worker's kvm.toml: the monitor switched along with a menu-started session.
+    kvm_status: Option<KvmStatus>,
+    /// The window sending a monitor home after its worker ended with it out.
+    kvm_home: Option<std::thread::JoinHandle<()>>,
+    /// A worker start that waits for `kvm_home`.
+    start_pending: bool,
+    /// Monitors connected here (uuid, name), for the peer settings; refreshed every few seconds.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    monitors: Vec<(String, String)>,
+    /// Every monitor name seen since start, by UUID: a monitor showing a peer may drop out of `monitors`.
+    monitor_names: std::collections::BTreeMap<String, String>,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    monitors_at: Instant,
+    /// What the worker last read from each monitor, for its input pickers.
+    inspects: std::collections::HashMap<String, status::InspectStatus>,
+    /// A monitor test waiting for the person's go-ahead: the peer and the monitors to show together.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    kvm_confirm: Option<(String, Vec<flowseam_core::config::DisplaySwitch>)>,
+    /// A test sent to the worker: the peer, its monitors, the token its result carries, and when it was sent.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    kvm_wait: Option<(String, Vec<String>, u64, Instant)>,
+    /// The answers picked so far on a several-monitor test's sheet, one per monitor, for the test `.0`.
+    #[cfg(target_os = "macos")]
+    kvm_answers: Option<(u64, Vec<crate::kvm_ui::Answer>)>,
+    /// What the last answers did, each shown under its monitor: (peer, monitor UUID, text).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    kvm_message: Vec<(String, String, String)>,
+    /// The monitor last asked to be inspected and when, so one read is asked at a time.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    inspect_asked: Option<(String, Instant)>,
+    /// Monitors unticked from their peer's tray button, kept beside the config.
+    skips: std::collections::BTreeSet<(String, String)>,
+    /// The switch lines as the tray last showed them, for the same buttons on the Overview page.
+    switch_peers: Vec<crate::menubar::PeerMenu>,
+    /// The peer driving this machine, for the Overview's "back" button.
+    switch_back: Option<String>,
     status_at: Instant,
     perms: Vec<String>,
     /// When `perms` was last read: grants change in System Settings while the window is open.
@@ -516,7 +914,15 @@ fn check_permissions() -> Vec<String> {
 }
 
 impl App {
-    fn new(menubar: crate::menubar::MenuBar) -> Self {
+    /// Short-lived work in progress that the next frames finish (see `repaint_interval`).
+    fn settling(&self) -> bool { self.quitting || self.stop_at.is_some() || self.restart_at.is_some() || self.apply_on_stop }
+    fn quit(&mut self) { self.quitting = true; self.apply_on_stop = false; self.stop_worker(); }
+    fn save_ui_prefs(&mut self) { if let Err(e) = crate::ui_prefs::save(&crate::ui_prefs::path(), &self.ui_prefs) { self.notice = crate::i18n::trf("無法儲存介面偏好：{}", &[&e]); } }
+    fn new(menubar: crate::menubar::MenuBar, ui_prefs: crate::ui_prefs::UiPrefs) -> Self {
+        #[cfg(target_os = "macos")]
+        let autostart_error = crate::autostart::migrate_legacy_login().err();
+        #[cfg(not(target_os = "macos"))]
+        let autostart_error = None;
         let (cfg, saved, notice) = match Config::load(&crate::config_path()) {
             Ok(c) => (c.clone(), Some(c), String::new()),
             Err(e) => (Config::default(), None, crate::i18n::trf("設定檔讀取失敗，改用預設（未覆寫檔案）：{}", &[&e])),
@@ -524,10 +930,14 @@ impl App {
         let mut app = App {
             about: crate::about::About::new(saved.as_ref().is_some_and(|c| !c.peers.is_empty())),
             menubar,
+            ui_prefs,
+            update_check: crate::update_check::Checker::new(),
             quitting: false,
+            show_requested: false,
+            first_frame: true,
             page: start_page(),
             autostart: None,
-            autostart_error: None,
+            autostart_error,
             ui: UiState::from_config(&cfg),
             saved,
             notice,
@@ -543,6 +953,22 @@ impl App {
             auto_restarted: false,
             watchdog_killed: false,
             link_status: None,
+            kvm_status: None,
+            kvm_home: None,
+            start_pending: false,
+            monitors: Vec::new(),
+            monitor_names: Default::default(),
+            monitors_at: Instant::now() - Duration::from_secs(60),
+            inspects: Default::default(),
+            kvm_confirm: None,
+            kvm_wait: None,
+            #[cfg(target_os = "macos")]
+            kvm_answers: None,
+            kvm_message: Vec::new(),
+            inspect_asked: None,
+            skips: Default::default(),
+            switch_peers: Vec::new(),
+            switch_back: None,
             status_at: Instant::now() - Duration::from_secs(1),
             perms: check_permissions(),
             perms_at: Instant::now(),
@@ -556,6 +982,10 @@ impl App {
                 cancel: None,
             },
         };
+        match crate::model::monitor_skips(&crate::config_dir()) {
+            Ok(skips) => app.skips = skips,
+            Err(e) => app.notice = crate::i18n::trf("無法讀取螢幕的勾選：{}", &[&e]),
+        }
         // Back to sharing if it was on, unless this is a preview window opened on one page (screenshots).
         if app.saved.is_some() && std::env::var_os("FLOWSEAM_PAGE").is_none() && crate::model::sharing_remembered(&crate::config_dir()) {
             app.start_worker();
@@ -590,8 +1020,17 @@ impl App {
 
     fn tick(&mut self) {
         if self.status_at.elapsed() >= Duration::from_secs(1) {
+            if crate::single::show_requested(&crate::config_dir()) { self.show_requested = true; }
+            #[cfg(target_os = "macos")]
+            self.menubar.check_activation_policy();
+            self.update_check.tick(&mut self.ui_prefs);
             self.link_status = status::read(&status::status_path(&crate::config_path())).ok();
+            self.kvm_status = status::read_kvm(&status::kvm_path(&crate::config_path())).ok();
             self.status_at = Instant::now();
+            // Only this worker's reads: one from before it started may describe a monitor since replugged.
+            if let Some(s) = self.kvm_status.as_ref().filter(|k| self.worker.as_ref().is_some_and(|w| k.written_ms >= w.started_ms)).and_then(|k| k.inspect.clone()) {
+                self.inspects.insert(s.uuid.clone(), s);
+            }
             if let Some(w) = &self.worker {
                 if self.stop_at.is_none() && !self.watchdog_killed {
                     if let Some(age) = crate::worker::stalled(w.started, w.started_ms, Instant::now(), self.link_status.as_ref().map(|s| s.written_ms), status::now_ms()) {
@@ -602,12 +1041,19 @@ impl App {
                 }
             }
         }
+        #[cfg(target_os = "macos")]
+        if self.monitors_at.elapsed() >= Duration::from_secs(3) {
+            self.monitors_at = Instant::now();
+            self.monitors = flowseam_mac::ddc::mac::online().map(|l| l.into_iter().map(|m| (m.uuid.clone(), m.name.unwrap_or(m.uuid))).collect()).unwrap_or_default();
+            self.monitor_names.extend(self.monitors.iter().cloned());
+        }
         if self.perms_at.elapsed() >= Duration::from_secs(2) {
             self.perms = check_permissions();
             self.perms_at = Instant::now();
         }
         if let Some(w) = &self.worker {
             if let Some(end) = w.poll() {
+                let started_ms = w.started_ms;
                 let died = matches!(end, WorkerStatus::Died(_));
                 // A quit Apple event can reach the worker rather than this process; quit as the menu's Quit does.
                 if end == WorkerStatus::QuitRequested {
@@ -618,6 +1064,7 @@ impl App {
                 self.status = end;
                 self.worker = None;
                 self.stop_at = None;
+                self.monitor_home_after(started_ms);
                 if std::mem::take(&mut self.apply_on_stop) {
                     self.start_worker();
                     if self.worker.is_some() {
@@ -632,6 +1079,11 @@ impl App {
             } else if let Some(t) = self.stop_at {
                 w.escalate(t);
             }
+        }
+        if self.start_pending && self.kvm_home.as_ref().is_none_or(|h| h.is_finished()) {
+            self.start_pending = false;
+            self.kvm_home = None;
+            self.start_worker();
         }
         if self.restart_at.is_some_and(|at| Instant::now() >= at) {
             self.restart_at = None;
@@ -789,7 +1241,243 @@ impl App {
         self.pairing.rx.is_some() || self.pairing.server_rx.is_some()
     }
 
+    /// A worker that ended with monitors still out (killed, or out of time on the way home) leaves them on
+    /// the peer while the keyboard and mouse are back here: send them home from this process. They come from
+    /// kvm.toml, not from the settings, which may have been edited since. Until this return lands no worker
+    /// starts, so the bus keeps one writer.
+    fn monitor_home_after(&mut self, started_ms: u64) {
+        let Some(k) = status::read_kvm(&status::kvm_path(&crate::config_path())).ok().filter(|k| k.written_ms >= started_ms && !k.out.is_empty()) else { return };
+        let peer = k.peer.clone().unwrap_or_default();
+        crate::worker::log_event(&format!("worker ended with {} monitor(s) out for {peer} ({:?}); sending them home", k.out.len(), k.phase));
+        #[cfg(target_os = "macos")]
+        {
+            self.kvm_home = Some(std::thread::spawn(move || {
+                use flowseam_mac::kvm::{mac, Cmd, Done, Monitor, Target};
+                // `input` is unused by a return.
+                let monitors = k.out.iter().map(|o| Monitor { uuid: o.uuid.clone(), input: o.home, home: o.home }).collect();
+                let done = mac::run_now(Cmd::Home { peer, target: Target { monitors } });
+                crate::worker::log_event(&format!("monitors home after the worker: {done:?}"));
+                // What is still out goes back into kvm.toml, which the next worker reads before replacing it,
+                // so a return that did not land here is tried again. No worker runs until this thread ends.
+                let (out, error) = match done {
+                    Done::Home { result, out, .. } => (out.into_iter().map(|m| status::OutMonitor { uuid: m.uuid, home: m.home }).collect(), result.err()),
+                    other => (k.out.clone(), Some(format!("unexpected answer: {other:?}"))),
+                };
+                let left = KvmStatus { written_ms: status::now_ms(), phase: KvmPhase::Idle, out, error, ..k };
+                if let Err(e) = status::write_kvm(&status::kvm_path(&crate::config_path()), &left) {
+                    crate::worker::log_event(&format!("kvm status write after the return: {e}"));
+                }
+            }));
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = (peer, k);
+    }
+
+    /// The tray's switch button for the i-th peer of the menu as last built.
+    // ponytail: an index into this frame's list; a peer list edited between the menu opening and the
+    // click can shift it. Carry the name in the menu id if peers ever get reordered live.
+    fn menu_switch(&mut self, i: usize, peers: &[crate::menubar::PeerMenu]) {
+        let Some(p) = peers.get(i) else { return };
+        let Some(w) = self.worker.as_mut() else { return };
+        let uuids: Vec<&str> = p.monitors.iter().filter(|m| m.ticked && m.usable).map(|m| m.uuid.as_str()).collect();
+        let line = if p.button == Some(crate::menubar::Button::InputAndDisplay) && !uuids.is_empty() { format!("switch {} {}", uuids.join(","), p.name) } else { format!("input {}", p.name) };
+        crate::worker::log_event(&format!("menu: {line}"));
+        if let Err(e) = w.send_line(&line) {
+            self.notice = crate::i18n::trf("無法切換：{}", &[&e.to_string()]);
+        }
+    }
+
+    /// Brings every monitor configured for `peer` home, whatever this worker switched.
+    fn monitors_home(&mut self, peer: &str) {
+        let Some(w) = self.worker.as_mut() else { return };
+        crate::worker::log_event(&format!("menu: return {peer}"));
+        if let Err(e) = w.send_line(&format!("return {peer}")) {
+            self.notice = crate::i18n::trf("無法切換：{}", &[&e.to_string()]);
+        }
+    }
+
+    /// Ticks or unticks the j-th monitor under the i-th peer's tray button, and remembers it.
+    fn menu_pick(&mut self, i: usize, j: usize, peers: &[crate::menubar::PeerMenu]) {
+        let Some((p, m)) = peers.get(i).and_then(|p| p.monitors.get(j).map(|m| (p, m))) else { return };
+        let key = (p.name.clone(), m.uuid.clone());
+        if !self.skips.remove(&key) {
+            self.skips.insert(key);
+        }
+        if let Err(e) = crate::model::save_monitor_skips(&crate::config_dir(), &self.skips) {
+            self.notice = crate::i18n::trf("無法記下螢幕的勾選：{}", &[&e]);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn ask_inspect(&mut self, uuid: String) {
+        if let Some(w) = self.worker.as_mut() {
+            if w.send_line(&format!("inspect {uuid}")).is_ok() {
+                self.inspect_asked = Some((uuid, Instant::now()));
+            }
+        }
+    }
+
+    /// The test's two sheets: the go-ahead, which says how long the monitors will be away, and after they
+    /// are back, the question of what each showed. The answer is asked after the return so that it works on
+    /// a Mac with this one monitor. Several monitors are tested together and answered on one sheet; the
+    /// answers are saved at once.
+    #[cfg(target_os = "macos")]
+    fn kvm_dialogs(&mut self, ctx: &egui::Context) {
+        use crate::kvm_ui::{answer, note, Answer, Saved};
+        use flowseam_mac::ddc::input_name;
+        let (tr, trf) = (crate::i18n::tr, crate::i18n::trf);
+        let name_of = |names: &std::collections::BTreeMap<String, String>, u: &str| names.get(u).cloned().unwrap_or_else(|| u.to_string());
+        if let Some((peer, ds)) = self.kvm_confirm.clone() {
+            // How long the worker running now holds a test, from its own kvm.toml.
+            let secs = self.kvm_status.as_ref().map_or(0, |k| k.trial_hold_ms.div_ceil(1000)).to_string();
+            let body = match ds.as_slice() {
+                [d] => trf("{} 會切到 {}，{} 秒後自動切回 {}。這段時間看不到這台 Mac 的畫面，鍵盤和滑鼠會留在 Mac。", &[&name_of(&self.monitor_names, &d.uuid), &input_name(d.input), &secs, &input_name(d.home)]),
+                _ => {
+                    let names = ds.iter().map(|d| name_of(&self.monitor_names, &d.uuid)).collect::<Vec<_>>().join("、");
+                    trf("{} 會一起切到 {} 用的輸入，{} 秒後自動切回。這段時間看不到這台 Mac 的畫面，鍵盤和滑鼠會留在 Mac。", &[&names, &peer, &secs])
+                }
+            };
+            let (go, closing) = sheet(ctx, "kvm-confirm", Icon::Display, PURPLE, &trf("測試 {} 的輸入", &[&peer]), &body, |ui, th| {
+                let mut go = None;
+                ui.horizontal(|ui| {
+                    if primary(ui, th, tr("開始測試")).clicked() {
+                        go = Some(true);
+                    }
+                    if secondary(ui, th, tr("取消")).clicked() {
+                        go = Some(false);
+                    }
+                });
+                go
+            });
+            if go == Some(true) {
+                let token = status::now_ms();
+                let sent = self.worker.as_mut().map(|w| w.send_line(&crate::kvm_ui::test_line(token, &peer, &ds)));
+                if matches!(sent, Some(Ok(()))) {
+                    self.kvm_message.retain(|(p, u, _)| !(*p == peer && ds.iter().any(|d| d.uuid == *u)));
+                    self.kvm_wait = Some((peer, ds.iter().map(|d| d.uuid.clone()).collect(), token, Instant::now()));
+                }
+                self.kvm_confirm = None;
+            } else if go == Some(false) || closing {
+                self.kvm_confirm = None;
+            }
+            return;
+        }
+        let Some((peer, uuids, token, sent)) = self.kvm_wait.clone() else { return };
+        let Some(trial) = self.kvm_status.as_ref().filter(|k| k.phase == KvmPhase::Idle).and_then(|k| k.trial.clone()).filter(|t| t.id == token) else {
+            // A test the worker refused, or that never reported back, leaves no result to ask about.
+            if sent.elapsed() >= KVM_TEST_WAIT {
+                let why = self.kvm_status.as_ref().and_then(|k| k.error.clone()).unwrap_or_else(|| tr("沒有回應").into());
+                let msg = trf("測試沒有開始：{}", &[&why]);
+                self.kvm_message.extend(uuids.into_iter().map(|u| (peer.clone(), u, msg.clone())));
+                self.kvm_wait = None;
+            }
+            return;
+        };
+        let n = trial.monitors.len();
+        if self.kvm_answers.as_ref().is_none_or(|(t, a)| *t != token || a.len() != n) {
+            self.kvm_answers = Some((token, vec![Answer::ThePeer; n]));
+        }
+        let names: Vec<String> = trial.monitors.iter().map(|m| name_of(&self.monitor_names, &m.uuid)).collect();
+        let (picked, closing) = if !trial.ok {
+            let reason = trial.reason.clone().unwrap_or_default();
+            let title = match trial.monitors.as_slice() {
+                [m] => trf("螢幕沒有切到 {}：{}", &[&input_name(m.input), &reason]),
+                _ => trf("螢幕沒有切換：{}", &[&reason]),
+            };
+            sheet(ctx, "kvm-failed", Icon::Display, ORANGE, &title, "", |ui, th| primary(ui, th, tr("好")).clicked().then(|| vec![Answer::Nothing; n]))
+        } else if let [m] = trial.monitors.as_slice() {
+            sheet(ctx, "kvm-answer", Icon::Display, PURPLE, &trf("剛剛 {} 顯示的是什麼？", &[&names[0]]), &trf("{} 切到 {} 的那幾秒", &[&names[0], &input_name(m.input)]), |ui, th| {
+                let mut a = None;
+                ui.vertical_centered_justified(|ui| {
+                    if primary(ui, th, &trf("{} 的畫面", &[&peer])).clicked() {
+                        a = Some(Answer::ThePeer);
+                    }
+                    ui.add_space(8.0);
+                    if secondary(ui, th, tr("別台電腦的畫面")).clicked() {
+                        a = Some(Answer::AnotherComputer);
+                    }
+                    ui.add_space(8.0);
+                    if secondary(ui, th, tr("黑畫面或沒有訊號")).clicked() {
+                        a = Some(Answer::Nothing);
+                    }
+                });
+                a.map(|a| vec![a])
+            })
+        } else {
+            let answers = &mut self.kvm_answers.as_mut().expect("set above").1;
+            sheet(ctx, "kvm-answer-all", Icon::Display, PURPLE, tr("剛剛這幾台螢幕顯示的是什麼？"), &trf("切到 {} 用的輸入的那幾秒", &[&peer]), |ui, th| {
+                for (name, a) in names.iter().zip(answers.iter_mut()) {
+                    ui.label(RichText::new(name).strong());
+                    ui.horizontal_wrapped(|ui| {
+                        ui.selectable_value(a, Answer::ThePeer, trf("{} 的畫面", &[&peer]));
+                        ui.selectable_value(a, Answer::AnotherComputer, tr("別台電腦的畫面"));
+                        ui.selectable_value(a, Answer::Nothing, tr("黑畫面或沒有訊號"));
+                    });
+                    ui.add_space(8.0);
+                }
+                let mut done = None;
+                ui.horizontal(|ui| {
+                    if primary(ui, th, tr("確認")).clicked() {
+                        done = Some(answers.clone());
+                    }
+                });
+                done
+            })
+        };
+        if picked.is_none() && !closing {
+            return;
+        }
+        self.kvm_wait = None;
+        self.kvm_answers = None;
+        // Closed without an answer: nothing changes.
+        let Some(answers) = picked else { return };
+        let Some(row) = self.ui.peers.iter_mut().find(|p| p.name == peer) else { return };
+        let before = row.displays.clone();
+        let outcomes: Vec<_> = trial.monitors.iter().zip(&answers).map(|(m, a)| (m.uuid.clone(), m.input, answer(&mut row.displays, &trial, m, *a))).collect();
+        let after = row.displays.clone();
+        // The answers are what the person came here to record: they are saved now, not left for Save.
+        let saved = if after == before { Saved::Unchanged } else { self.save_monitors(&peer, after) };
+        let reason = trial.reason.clone().unwrap_or_default();
+        for (uuid, input, outcome) in outcomes {
+            let msg = note(outcome, &saved, &peer, &input_name(input), &reason);
+            self.kvm_message.retain(|(p, u, _)| !(*p == peer && *u == uuid));
+            self.kvm_message.push((peer.clone(), uuid, msg));
+        }
+    }
+
+    /// Writes `peer`'s monitors into the saved config, and only them: the form's other edits wait for Save.
+    /// Then restarts sharing, as Save does, so the worker runs them.
+    #[cfg(target_os = "macos")]
+    fn save_monitors(&mut self, peer: &str, displays: Vec<flowseam_core::config::DisplaySwitch>) -> crate::kvm_ui::Saved {
+        use crate::kvm_ui::Saved;
+        let Some(mut cfg) = self.saved.clone() else { return Saved::Failed(crate::i18n::tr("設定還沒儲存過").into()) };
+        let Some(p) = cfg.peers.iter_mut().find(|p| p.name == peer) else { return Saved::Failed(crate::i18n::trf("{} 還沒儲存", &[&peer])) };
+        p.displays = displays;
+        if let Err(e) = cfg.save(&crate::config_path()) {
+            return Saved::Failed(e.to_string());
+        }
+        self.saved = Some(cfg);
+        if self.worker.is_some() && self.stop_at.is_none() {
+            self.apply_on_stop = true;
+            self.stop_worker();
+        }
+        Saved::Yes
+    }
+
+    /// The tray's "back" button on a machine being driven.
+    fn menu_home(&mut self) {
+        let Some(w) = self.worker.as_mut() else { return };
+        crate::worker::log_event("menu: hand control back");
+        if let Err(e) = w.send_line("home") {
+            self.notice = crate::i18n::trf("無法切換：{}", &[&e.to_string()]);
+        }
+    }
+
     fn start_worker(&mut self) {
+        if self.kvm_home.as_ref().is_some_and(|h| !h.is_finished()) {
+            self.start_pending = true;
+            return;
+        }
         // worker 讀的是磁碟上的檔案，所以執行中的設定一定等於已儲存的設定。
         if self.pairing_running() {
             self.notice = crate::i18n::tr("請先完成配對").into();
@@ -869,7 +1557,7 @@ impl App {
         for (page, label, tint, icon) in PAGES {
             if sidebar_item(ui, th, self.page == page, crate::i18n::tr(label), tint, icon).clicked() {
                 self.page = page;
-                if page == Page::Advanced { self.autostart = None; self.autostart_error = None; }
+                if page == Page::Advanced { self.autostart = None; }
             }
         }
         // The sharing switch stays in reach on every page, at the foot of the sidebar.
@@ -1053,6 +1741,7 @@ impl App {
                 });
             }
         });
+        self.switch_card(ui, th);
         section(ui, th, crate::i18n::tr("切換方式"));
         card(ui, th, |ui| {
             row(
@@ -1080,9 +1769,83 @@ impl App {
         });
     }
 
+    /// The tray's switch buttons on the Overview: each connected peer's button with a tick box per monitor
+    /// beside it, and on a machine being driven, the button back. Same lines, same actions as the tray.
+    fn switch_card(&mut self, ui: &mut egui::Ui, th: Theme) {
+        use crate::menubar::{Action, Button};
+        let (tr, trf) = (crate::i18n::tr, crate::i18n::trf);
+        let peers = self.switch_peers.clone();
+        let back = self.switch_back.clone();
+        if back.is_none() && peers.iter().all(|p| p.button.is_none()) {
+            return;
+        }
+        section(ui, th, tr("切換"));
+        let mut act = None;
+        let mut bring = None;
+        card(ui, th, |ui| {
+            let mut first = true;
+            if let Some(by) = &back {
+                row(ui, th, first, &trf("回到 {}", &[by]), Some(tr("鍵盤和滑鼠交回去，對方的螢幕也一起切回")), |ui| {
+                    if primary(ui, th, tr("回去")).clicked() {
+                        act = Some(Action::Home);
+                    }
+                });
+                first = false;
+            }
+            for (i, p) in peers.iter().enumerate() {
+                let Some(button) = p.button else { continue };
+                row(ui, th, first, &trf("切到 {}", &[&p.name]), p.note.as_deref(), |ui| {
+                    if button == Button::Busy {
+                        ui.label(tr("螢幕切換中…"));
+                        return;
+                    }
+                    if primary(ui, th, if button == Button::InputAndDisplay { tr("螢幕＋鍵鼠") } else { tr("只切鍵鼠") }).clicked() {
+                        act = Some(Action::SwitchTo(i));
+                    }
+                    // For a monitor left showing the peer (this Mac restarted, or the monitor switched by itself).
+                    if !p.monitors.is_empty() && secondary(ui, th, tr("螢幕切回")).on_hover_text(tr("把這台的螢幕都切回這台 Mac")).clicked() {
+                        bring = Some(i);
+                    }
+                });
+                first = false;
+                if button == Button::Busy {
+                    continue;
+                }
+                for (j, m) in p.monitors.iter().enumerate() {
+                    row(ui, th, false, &m.label, None, |ui| {
+                        let mut on = m.ticked && m.usable;
+                        if ui.add_enabled(m.usable, egui::Checkbox::without_text(&mut on)).changed() {
+                            act = Some(Action::Pick(i, j));
+                        }
+                    });
+                }
+            }
+        });
+        if let Some(p) = bring.and_then(|i| peers.get(i)) {
+            self.monitors_home(&p.name);
+        }
+        match act {
+            Some(Action::SwitchTo(i)) => self.menu_switch(i, &peers),
+            Some(Action::Pick(i, j)) => self.menu_pick(i, j, &peers),
+            Some(Action::Home) => self.menu_home(),
+            _ => {}
+        }
+    }
+
     fn page_edges(&mut self, ui: &mut egui::Ui, th: Theme) {
         let mut remove = None;
         let pairing_busy = self.pairing_running();
+        #[cfg(target_os = "macos")]
+        let (kvm_live, running, monitors, names, inspects, message) = (
+            self.kvm_status.clone().filter(|k| self.worker.as_ref().is_some_and(|w| k.written_ms >= w.started_ms)),
+            self.worker.is_some() && self.stop_at.is_none(),
+            self.monitors.clone(),
+            self.monitor_names.clone(),
+            self.inspects.clone(),
+            self.kvm_message.clone(),
+        );
+        #[cfg(target_os = "macos")]
+        let mut kvm_action: Option<KvmAction> = None;
         for (i, p) in self.ui.peers.iter_mut().enumerate() {
             if i > 0 {
                 ui.add_space(14.0);
@@ -1158,6 +1921,46 @@ impl App {
                         },
                     );
                 }
+                // A Mac peer takes the gestures themselves; only a PC needs them turned into shortcuts.
+                if role().shows_key_mapping() && p.keys != KeyMap::None {
+                    row(
+                        ui,
+                        th,
+                        false,
+                        crate::i18n::tr("手勢對應"),
+                        Some(crate::i18n::tr("Mac 觸控板的手勢到對方怎麼解讀")),
+                        |ui| {
+                            let linked = p.gestures.is_linked();
+                            let habit = p.gestures.habit(p.keys);
+                            ui.add_enabled_ui(!linked, |ui| {
+                                egui::ComboBox::from_id_salt(("gestures", i))
+                                    .selected_text(habit_label(habit))
+                                    .width(250.0)
+                                    .show_ui(ui, |ui| {
+                                        for h in [Habit::Mac, Habit::Windows] {
+                                            ui.selectable_value(&mut p.gestures, chosen(h), habit_label(h));
+                                        }
+                                    });
+                            });
+                            let hint = if linked {
+                                crate::i18n::tr("跟著按鍵對應：依 Mac 快捷鍵用 Mac 手勢，依鍵盤位置用 Windows 觸控板。按一下解鎖，自己選")
+                            } else {
+                                crate::i18n::tr("按一下鎖定，跟著按鍵對應")
+                            };
+                            if lock_button(ui, th, linked).on_hover_text(hint).clicked() {
+                                // Unlocked, the choice starts from what was showing.
+                                p.gestures = if linked { chosen(habit) } else { GestureMap::Linked };
+                            }
+                        },
+                    );
+                }
+                #[cfg(target_os = "macos")]
+                if role().shows_key_mapping() && !p.fingerprint.is_empty() {
+                    for s in inspects.values() {
+                        crate::kvm_ui::apply_inspect(&mut p.displays, s);
+                    }
+                    monitor_rows(ui, th, i, p, &monitors, &names, &inspects, kvm_live.as_ref(), running, &message, &mut kvm_action);
+                }
                 row(ui, th, false, "", None, |ui| {
                     let hint = if pairing_busy { crate::i18n::tr("配對中，完成後才能移除") } else { "" };
                     if ui.add_enabled(!pairing_busy, egui::Button::new(RichText::new(crate::i18n::tr("移除這台裝置")).color(RED)).frame(false)).on_disabled_hover_text(hint).clicked() {
@@ -1170,11 +1973,30 @@ impl App {
             self.ui.peers.remove(i);
             self.pairing.peer = 0;
         }
+        #[cfg(target_os = "macos")]
+        {
+            // Each added monitor is read once, one at a time, so its input lists and this Mac's input fill in
+            // by themselves. A read that never comes back (the worker was busy) is asked again after a while.
+            let waiting = self.inspect_asked.as_ref().is_some_and(|(u, at)| !self.inspects.contains_key(u) && at.elapsed() < Duration::from_secs(5));
+            let unread = self.ui.peers.iter().flat_map(|p| &p.displays).map(|d| d.uuid.clone()).find(|u| !self.inspects.contains_key(u));
+            match kvm_action.take() {
+                Some(KvmAction::Inspect(u)) => {
+                    self.inspects.remove(&u);
+                    self.ask_inspect(u);
+                }
+                Some(KvmAction::Test(peer, ds)) => self.kvm_confirm = Some((peer, ds)),
+                None => {
+                    if let Some(u) = unread.filter(|_| running && !waiting) {
+                        self.ask_inspect(u);
+                    }
+                }
+            }
+        }
         ui.add_space(14.0);
         ui.add_enabled_ui(self.ui.peers.len() < 4, |ui| {
             if secondary(ui, th, crate::i18n::tr("＋ 新增裝置")).clicked() {
                 let free = EDGES.into_iter().find(|e| self.ui.peers.iter().all(|p| p.edge != *e)).unwrap_or(Edge::Right);
-                self.ui.peers.push(PeerRow { name: String::new(), addr: String::new(), edge: free, fingerprint: String::new(), keys: KeyMap::default() });
+                self.ui.peers.push(PeerRow { name: String::new(), addr: String::new(), edge: free, fingerprint: String::new(), keys: KeyMap::default(), gestures: Default::default(), displays: Vec::new() });
             }
         });
     }
@@ -1377,7 +2199,20 @@ impl App {
             _ => None,
         };
         card(ui, th, |ui| {
-            row(ui, th, true, crate::i18n::tr("語言"), None, |ui| {
+            #[cfg(target_os = "macos")]
+            {
+                let mut dock = false;
+                row(ui, th, true, crate::i18n::tr("在 Dock 顯示圖示"), Some(crate::i18n::tr("關掉後，開著設定視窗時 Dock 也不會出現 Flowseam")), |ui| { dock = toggle(ui, th, self.ui_prefs.dock_icon).clicked(); });
+                if dock { self.ui_prefs.dock_icon = !self.ui_prefs.dock_icon; self.save_ui_prefs(); self.menubar.set_icons(self.ui_prefs.dock_icon, self.ui_prefs.menu_bar_icon); }
+                let mut menu = false;
+                row(ui, th, false, crate::i18n::tr("在選單列顯示圖示"), Some(crate::i18n::tr("隱藏後，要開設定視窗，在 Finder 或 Spotlight 再開一次 Flowseam")), |ui| { menu = toggle(ui, th, self.ui_prefs.menu_bar_icon).clicked(); });
+                if menu { self.ui_prefs.menu_bar_icon = !self.ui_prefs.menu_bar_icon; self.save_ui_prefs(); self.menubar.set_icons(self.ui_prefs.dock_icon, self.ui_prefs.menu_bar_icon); }
+            }
+            let mut updates = false;
+            let update_hint = match (&self.update_check.result, crate::update_check::shown_newer(self.update_check.result.as_ref(), &self.ui_prefs.skipped_version)) { (_, Some(v)) => crate::i18n::trf("有新版：{}", &[&v]), (Some(crate::update_check::Result::Failed(why)), _) => crate::i18n::trf("上次檢查失敗：{}", &[why]), (Some(crate::update_check::Result::UpToDate), _) => crate::i18n::tr("已是最新版").into(), _ => crate::i18n::tr("每天向 GitHub 查一次有沒有新版；只提示，不會自動安裝").into() };
+            row(ui, th, false, crate::i18n::tr("自動檢查更新"), Some(&update_hint), |ui| { updates = toggle(ui, th, self.ui_prefs.check_updates).clicked(); });
+            if updates { self.ui_prefs.check_updates = !self.ui_prefs.check_updates; self.save_ui_prefs(); if !self.ui_prefs.check_updates { self.update_check.clear(); } }
+            row(ui, th, !cfg!(target_os = "macos"), crate::i18n::tr("語言"), None, |ui| {
                 let selected = crate::i18n::selected();
                 native_controls(ui, th, |ui| {
                     egui::ComboBox::from_id_salt("language").width(150.0).selected_text(RichText::new(selected.map_or(crate::i18n::tr("跟隨系統"), crate::i18n::Lang::name)).size(13.0)).show_ui(ui, |ui| {
@@ -1439,6 +2274,9 @@ impl App {
                     }
                 },
             );
+            let mut quit = false;
+            row_frame(ui, |ui| { quit = secondary(ui, th, crate::i18n::tr("結束 Flowseam")).clicked(); });
+            if quit { self.quit(); }
         });
     }
 
@@ -1489,16 +2327,38 @@ impl App {
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.tick();
+        #[cfg(target_os = "macos")]
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Q)) { self.quit(); }
         if crate::menubar::close_to_hide(ctx.input(|i| i.viewport().close_requested()), self.quitting) { ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose); self.menubar.set_hidden(ctx, true); }
-        let peers: Vec<_> = self.ui.peers.iter().filter(|p| !p.fingerprint.is_empty()).map(|p| { let (live, _) = liveness(self.worker.is_some(), self.link_status.as_ref(), status::now_ms(), &p.name); (p.name.clone(), live) }).collect();
-        self.menubar.refresh(self.worker.is_some() && self.stop_at.is_none(), !self.pairing_running() && self.stop_at.is_none(), &peers);
-        for action in self.menubar.actions() { match action { crate::menubar::Action::Toggle => { if self.worker.is_some() && self.stop_at.is_none() { self.stop_worker(); if let Err(e) = crate::model::remember_sharing(&crate::config_dir(), false) { self.notice = crate::i18n::trf("無法記下共用狀態：{}", &[&e]); } } else if self.worker.is_none() { self.start_worker(); if self.worker.is_some() { if let Err(e) = crate::model::remember_sharing(&crate::config_dir(), true) { self.notice = crate::i18n::trf("無法記下共用狀態：{}", &[&e]); } } } }, crate::menubar::Action::Settings => self.menubar.set_hidden(ctx, false), crate::menubar::Action::Hide => self.menubar.set_hidden(ctx, true), crate::menubar::Action::WhatsNew => crate::about::show_whats_new(), crate::menubar::Action::Updates => crate::about::show_update_check(), crate::menubar::Action::Quit => { self.quitting = true; self.apply_on_stop = false; self.stop_worker(); } } }
+        // Only the controller side has a switch button; this worker's kvm.toml, not a previous one's, decides its state.
+        let can_switch = cfg!(target_os = "macos") && self.worker.is_some() && self.stop_at.is_none();
+        let kvm = self.kvm_status.as_ref().filter(|k| self.worker.as_ref().is_some_and(|w| k.written_ms >= w.started_ms));
+        let peers: Vec<_> = self.ui.peers.iter().filter(|p| !p.fingerprint.is_empty()).map(|p| {
+            let (live, _) = liveness(self.worker.is_some(), self.link_status.as_ref(), status::now_ms(), &p.name);
+            let name_of = |u: &str| self.monitor_names.get(u).cloned().unwrap_or_else(|| u.to_string());
+            let (button, monitors, note) = if can_switch && peer_up(self.link_status.as_ref(), status::now_ms(), &p.name) { peer_menu(kvm, &p.name, !p.displays.is_empty(), &name_of, &self.skips) } else { (None, Vec::new(), None) };
+            crate::menubar::PeerMenu { name: p.name.clone(), live, button, monitors, note }
+        }).collect();
+        let note = kvm.and_then(|k| k.error.clone());
+        let running = self.worker.is_some() && self.stop_at.is_none();
+        let driven_by = back_to(role(), running, driven_by(running, self.link_status.as_ref(), status::now_ms()), self.ui.peers.first().map(|p| p.name.as_str()));
+        let newer = crate::update_check::shown_newer(self.update_check.result.as_ref(), &self.ui_prefs.skipped_version);
+        self.menubar.refresh(self.worker.is_some() && self.stop_at.is_none(), !self.pairing_running() && self.stop_at.is_none(), &peers, driven_by.as_deref(), note.as_deref(), newer);
+        if std::mem::take(&mut self.first_frame) && self.menubar.is_hidden() { self.menubar.set_hidden(ctx, true); }
+        #[cfg(target_os = "macos")]
+        if crate::menubar::take_reopen() { self.menubar.set_hidden(ctx, false); }
+        if std::mem::take(&mut self.show_requested) { self.menubar.set_hidden(ctx, false); }
+        for action in self.menubar.actions() { match action { crate::menubar::Action::SwitchTo(i) => self.menu_switch(i, &peers), crate::menubar::Action::Pick(i, j) => self.menu_pick(i, j, &peers), crate::menubar::Action::Home => self.menu_home(), crate::menubar::Action::Toggle => { if self.worker.is_some() && self.stop_at.is_none() { self.stop_worker(); if let Err(e) = crate::model::remember_sharing(&crate::config_dir(), false) { self.notice = crate::i18n::trf("無法記下共用狀態：{}", &[&e]); } } else if self.worker.is_none() { self.start_worker(); if self.worker.is_some() { if let Err(e) = crate::model::remember_sharing(&crate::config_dir(), true) { self.notice = crate::i18n::trf("無法記下共用狀態：{}", &[&e]); } } } }, crate::menubar::Action::Settings => self.menubar.set_hidden(ctx, false), crate::menubar::Action::Hide => self.menubar.set_hidden(ctx, true), crate::menubar::Action::WhatsNew => crate::about::show_whats_new(), crate::menubar::Action::Updates | crate::menubar::Action::NewerUpdates => crate::about::show_update_check(), crate::menubar::Action::Quit => self.quit() } }
+        self.switch_peers = peers;
+        self.switch_back = driven_by;
         if self.quitting && self.worker.is_none() { ctx.send_viewport_cmd(egui::ViewportCommand::Close); }
-        ctx.request_repaint_after(Duration::from_millis(200));
+        ctx.request_repaint_after(repaint_interval(self.menubar.is_hidden(), self.settling()));
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let th = Theme::of(ui.ctx().theme() == egui::Theme::Dark);
+        #[cfg(target_os = "macos")]
+        self.kvm_dialogs(&ui.ctx().clone());
         egui::Panel::left("nav")
             .exact_size(SIDEBAR_W)
             .resizable(false)
@@ -1540,7 +2400,9 @@ impl eframe::App for App {
                     });
             });
 
+        self.about.newer = match &self.update_check.result { Some(crate::update_check::Result::Newer(v)) => Some(v.clone()), _ => None };
         self.about.draw(ui.ctx());
+        if let Some(v) = self.about.take_skip() { self.ui_prefs.skipped_version = v; self.save_ui_prefs(); }
         // The title bar is transparent: dragging the band at the top of the window moves it.
         #[cfg(target_os = "macos")]
         let ctx = ui.ctx().clone();
@@ -1654,6 +2516,33 @@ fn toggle(ui: &mut egui::Ui, th: Theme, on: bool) -> egui::Response {
     let x = egui::lerp((rect.left() + 12.0)..=(rect.right() - 12.0), t);
     p.circle_filled(egui::pos2(x, rect.center().y + 0.5), 10.5, Color32::from_black_alpha(40));
     p.circle_filled(egui::pos2(x, rect.center().y), 10.0, Color32::WHITE);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// A padlock, shut in the accent colour while locked, its shackle lifted open while not.
+fn lock_button(ui: &mut egui::Ui, th: Theme, locked: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(26.0, 26.0), Sense::click());
+    let p = ui.painter();
+    if resp.hovered() {
+        p.rect_filled(rect, CornerRadius::same(6), if th.dark { Color32::from_white_alpha(14) } else { Color32::from_black_alpha(12) });
+    }
+    let c = if locked { th.accent } else { th.text2 };
+    let body = egui::Rect::from_center_size(rect.center() + egui::vec2(0.0, 3.5), egui::vec2(13.0, 9.5));
+    p.rect_filled(body, CornerRadius::same(2), c);
+    let r = 4.0;
+    // Open, the shackle rises so its right leg leaves the body.
+    let lift = if locked { 0.0 } else { 3.0 };
+    let top = body.top() - 3.0 - lift;
+    let arc: Vec<egui::Pos2> = (0..=16)
+        .map(|k| {
+            let t = std::f32::consts::PI * (1.0 + k as f32 / 16.0);
+            egui::pos2(body.center().x + r * t.cos(), top + r * t.sin())
+        })
+        .collect();
+    let s = Stroke::new(1.8, c);
+    p.add(egui::Shape::line(arc, s));
+    p.line_segment([egui::pos2(body.center().x - r, top), egui::pos2(body.center().x - r, body.top())], s);
+    p.line_segment([egui::pos2(body.center().x + r, top), egui::pos2(body.center().x + r, body.top() - lift)], s);
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 

@@ -395,10 +395,42 @@ pub fn flags_for(mods: flowseam_core::proto::ModifierSet) -> u64 {
     f
 }
 
+/// CGEventFlags a Mac keyboard sets on a key by itself: the fn bit on the arrows, the function keys and the
+/// navigation block, and the keypad bit on the arrows too. The system shortcuts are stored with the fn bit
+/// (⌃↑ as Control+fn, F11 as fn), so an injected ⌃↑ or F11 without it triggers nothing.
+pub fn key_flags(hid: u16) -> u64 {
+    const SECONDARY_FN: u64 = 0x0080_0000;
+    const NUMERIC_PAD: u64 = 0x0020_0000;
+    match hid {
+        0x4F..=0x52 => SECONDARY_FN | NUMERIC_PAD,
+        0x3A..=0x45 | 0x68..=0x6F | 0x49..=0x4E => SECONDARY_FN,
+        _ => 0,
+    }
+}
+
 #[cfg(test)]
 mod flag_tests {
     use super::*;
     use flowseam_core::proto::ModifierSet;
+
+    #[test]
+    fn system_shortcut_keys_carry_the_fn_bit_their_hotkeys_are_stored_with() {
+        const CONTROL_FN: u64 = 0x0084_0000; // Mission Control's ⌃↑ and the spaces' ⌃← ⌃→ in symbolichotkeys
+        const FN: u64 = 0x0080_0000; // Show Desktop's F11
+        let ctrl = flags_for(ModifierSet(ModifierSet::CTRL));
+        for arrow in [0x4F, 0x50, 0x51, 0x52] {
+            assert_eq!((ctrl | key_flags(arrow)) & CONTROL_FN, CONTROL_FN, "arrow {arrow:#x}");
+        }
+        for f in [0x3A, 0x44, 0x45, 0x68, 0x6F] {
+            assert_eq!(key_flags(f) & FN, FN, "F key {f:#x}");
+        }
+        for nav in [0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E] {
+            assert_eq!(key_flags(nav), FN, "navigation key {nav:#x}");
+        }
+        for plain in [0x04, 0x2C, 0x28, 0x2D, 0x2E, 0x27, 0x59, 0xE0, 0xE3] {
+            assert_eq!(key_flags(plain), 0, "{plain:#x} has no flag of its own");
+        }
+    }
 
     #[test]
     fn flags_follow_the_cgeventflags_aggregate_bits() {

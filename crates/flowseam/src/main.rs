@@ -3,8 +3,14 @@ mod about;
 mod autostart;
 mod gui;
 mod i18n;
+// The monitor switch is set up from the controller, a Mac; on Windows only its tests use it.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod kvm_ui;
 mod menubar;
 mod model;
+mod single;
+mod ui_prefs;
+mod update_check;
 mod worker;
 
 use std::path::PathBuf;
@@ -100,6 +106,8 @@ fn main() {
         None | Some("gui") | Some("--hidden") => { if let Err(e) = i18n::load_prefs(&config_dir().join("prefs.toml")) { eprintln!("flowseam: prefs.toml: {e}"); } gui::run(args.iter().any(|a| a == "--hidden")) },
         Some("worker") => cmd_worker(&args[1..]),
         Some("pair") => cmd_pair(),
+        #[cfg(target_os = "macos")]
+        Some("launch-at-login") => autostart::launch_at_login(),
         Some(other) => {
             eprintln!("未知子命令 {other:?}；可用：gui | worker --config <path> | pair");
             2
@@ -147,14 +155,16 @@ fn cmd_worker(args: &[String]) -> i32 {
     };
     #[cfg(target_os = "windows")]
     {
-        use std::io::Read;
+        use std::io::BufRead;
+        // Each stdin line is a command from the window (`home` is its "back" button); EOF is the stop request.
         std::thread::spawn(|| {
-            let mut stdin = std::io::stdin();
-            let mut buf = [0u8; 1024];
-            while let Ok(n) = stdin.read(&mut buf) {
-                if n == 0 {
-                    std::process::exit(0);
+            let mut stdin = std::io::stdin().lock();
+            let mut buf = Vec::new();
+            while matches!(stdin.read_until(b'\n', &mut buf), Ok(n) if n > 0) {
+                if String::from_utf8_lossy(&buf).trim() == "home" {
+                    flowseam_win::app::ask_home();
                 }
+                buf.clear();
             }
             std::process::exit(0);
         });
@@ -169,7 +179,7 @@ fn cmd_worker(args: &[String]) -> i32 {
         };
     }
     #[cfg(target_os = "macos")]
-    match flowseam_mac::worker::run(&cfg) {
+    match flowseam_mac::worker::run(&cfg, &path) {
         Ok(()) => 0,
         Err(e) => {
             flowseam_core::log::line(&format!("worker: {e:?}"));

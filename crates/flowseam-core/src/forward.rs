@@ -21,12 +21,13 @@ use std::collections::{BTreeSet, HashMap};
 
 use crate::backend::{CapturedEvent, Disposition};
 use crate::chord::ChordError;
-use crate::config::{Config, KeyMap};
+use crate::config::{Config, GestureMap, KeyMap};
 use crate::emergency::is_emergency;
-use crate::geometry::{clamp_inside, clamp_to_displays, contains, entry_point, exit_frac, in_exit_strip};
+use crate::geometry::{center_point, clamp_inside, clamp_to_displays, contains, entry_point, exit_frac, in_exit_strip};
+use crate::gesture::{GestureKeys, Habit, Platform, Stroke};
 use crate::mac_shortcuts::MacShortcuts;
 use crate::modifiers::KeyTracker;
-use crate::proto::{Edge, ModifierSet, Msg, Point, Reason, Rect, PRIMARY_BUTTON};
+use crate::proto::{Edge, Gesture, ModifierSet, Msg, Point, Reason, Rect, CENTERED_PROTO_VERSION, CLOSED_PROTO_VERSION, GESTURE_PROTO_VERSION, PRIMARY_BUTTON};
 use crate::switch::{decide, SwitchEvent, SwitchPolicy, SwitchState};
 
 /// Effects on this machine. The real implementation wraps the OS layer; tests record.
@@ -70,6 +71,8 @@ pub struct PeerSpec {
     pub edge: Edge,
     /// How our keys land there; applied to every key this side sends that peer.
     pub keys: KeyMap,
+    /// What our trackpad gestures do there, when it is a PC.
+    pub gestures: GestureMap,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,7 +85,7 @@ pub struct FwdConfig {
 impl FwdConfig {
     pub fn from_config(cfg: &Config) -> Result<Self, ChordError> {
         Ok(Self {
-            peers: cfg.peers.iter().map(|p| PeerSpec { name: p.name.clone(), edge: p.edge.into(), keys: p.keys }).collect(),
+            peers: cfg.peers.iter().map(|p| PeerSpec { name: p.name.clone(), edge: p.edge.into(), keys: p.keys, gestures: p.gestures }).collect(),
             policy: SwitchPolicy::from_config(&cfg.switch)?,
             boundary_px: cfg.switch.boundary_px,
         })
@@ -97,6 +100,9 @@ pub enum Mode {
     Relay { from: String, from_seq: u32, edge: Edge, to: String, to_seq: u32, exit_pos: Point, keys: BTreeSet<u16> },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwitchTo { Switched, UnknownPeer, NotLocal, PeerDown }
+
 pub fn opposite(e: Edge) -> Edge {
     match e {
         Edge::Left => Edge::Right,
@@ -109,6 +115,26 @@ pub fn opposite(e: Edge) -> Edge {
 const FRAC_MID: u16 = 0x8000;
 const TAKEOVER_PX: u64 = 8;
 const TAKEOVER_WINDOW_MS: u64 = 300;
+/// A hold for a menu switch outlasts any real monitor switch (two monitors measured 3.4 s); one never
+/// lifted lapses here, so the edges cannot stay dead.
+const SWITCH_HOLD_LIMIT_MS: u64 = 15_000;
+
+/// Where the cursor appears on the peer: next to the edge it came through, or, for a switch that came
+/// through no edge (the menu, the chord), in the middle of the display on that side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Landing {
+    Edge,
+    Center,
+}
+
+/// Whether the edge toward the controller ends a session. `Closed` when a menu switch moved every display
+/// of the controller to this session's machine: that edge then leads to a machine nobody can see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WayBack {
+    #[default]
+    Open,
+    Closed,
+}
 
 pub struct Forwarder<S: InputSink, O: Outbox> {
     cfg: FwdConfig,
@@ -128,6 +154,10 @@ pub struct Forwarder<S: InputSink, O: Outbox> {
     last_pos: Point,
     /// Shortcut translation for the peer being driven when its map is `KeyMap::Mac`; fresh per session.
     mac_keys: MacShortcuts,
+    /// Protocol version each linked peer speaks, as negotiated.
+    speaks: HashMap<String, u16>,
+    /// Gestures as shortcuts, for this session's peer or for this machine; fresh per session.
+    gesture_keys: GestureKeys,
     /// The primary button is down from a press made here while input stayed local.
     held_here: bool,
     /// The primary button is physically down (tap view, any mode).
@@ -136,6 +166,10 @@ pub struct Forwarder<S: InputSink, O: Outbox> {
     /// to the peer, so this machine owes itself a release when control comes back.
     crossed_holding: bool,
     takeover_motion: Option<(u64, u64)>,
+    /// Since when a menu switch has held input here (`hold_for_switch`).
+    switch_hold: Option<u64>,
+    /// The way back of the session this machine is driven in, as its `Enter` set it; a relay keeps it.
+    way_back: WayBack,
 }
 
 impl<S: InputSink, O: Outbox> Forwarder<S, O> {
@@ -156,10 +190,14 @@ impl<S: InputSink, O: Outbox> Forwarder<S, O> {
             inj_btn: BTreeSet::new(),
             last_pos: start,
             mac_keys: MacShortcuts::new(),
+            speaks: HashMap::new(),
+            gesture_keys: GestureKeys::new(),
             held_here: false,
             primary_down: false,
             crossed_holding: false,
             takeover_motion: None,
+            switch_hold: None,
+            way_back: WayBack::Open,
         }
     }
 
@@ -175,6 +213,55 @@ impl<S: InputSink, O: Outbox> Forwarder<S, O> {
     pub fn out(&self) -> &O {
         &self.out
     }
+    /// What `switch_to(peer)` would do now, without doing it: a monitor switched ahead of the input
+    /// must not be switched for a peer the input cannot reach.
+    pub fn can_switch_to(&self, peer: &str) -> SwitchTo {
+        if !self.cfg.peers.iter().any(|p| p.name == peer) {
+            return SwitchTo::UnknownPeer;
+        }
+        if !matches!(self.mode, Mode::Local) {
+            return SwitchTo::NotLocal;
+        }
+        if !self.up.contains(peer) {
+            return SwitchTo::PeerDown;
+        }
+        SwitchTo::Switched
+    }
+
+    /// Hands input to `peer` now, as the switch chord would, from wherever the cursor is. `Closed` asks the
+    /// peer to keep its edge back here from ending the session, for when it shows on every display here.
+    pub fn switch_to(&mut self, peer: &str, way_back: WayBack) -> SwitchTo {
+        let r = self.can_switch_to(peer);
+        if let (SwitchTo::Switched, Some(idx)) = (r, self.cfg.peers.iter().position(|p| p.name == peer)) {
+            self.enter_out(idx, self.last_pos, None, Landing::Center, way_back);
+        }
+        r
+    }
+
+    /// While a menu switch moves the monitors, input stays here and must not leave by itself: the edge or
+    /// the chord would hand it to some peer, and the switch, finding this machine busy, would send the
+    /// monitors back. `switch_to` still hands it over. The caller holds for as long as the monitors are
+    /// on their way; a hold never lifted lapses after `SWITCH_HOLD_LIMIT_MS`.
+    pub fn hold_for_switch(&mut self, on: bool, now_ms: u64) {
+        if !on {
+            self.switch_hold = None;
+        } else if self.switch_hold.is_none() {
+            self.switch_hold = Some(now_ms);
+        }
+    }
+
+    fn holding(&self, now_ms: u64) -> bool {
+        self.switch_hold.is_some_and(|since| now_ms.saturating_sub(since) < SWITCH_HOLD_LIMIT_MS)
+    }
+
+    /// Ends whatever session this machine is part of, the way the emergency chord does. Returns
+    /// whether there was one.
+    pub fn release_control(&mut self) -> bool {
+        let active = !matches!(self.mode, Mode::Local);
+        self.emergency();
+        active
+    }
+
     pub fn set_config(&mut self, cfg: FwdConfig) {
         if let Mode::Relay { from, from_seq, edge, to, to_seq, exit_pos, keys } = self.mode.clone() {
             let changed = |name: &str| self.cfg.peers.iter().find(|p| p.name == name) != cfg.peers.iter().find(|p| p.name == name);
@@ -195,13 +282,18 @@ impl<S: InputSink, O: Outbox> Forwarder<S, O> {
             let new = cfg.peers.iter().find(|p| p.name == peer);
             if old != new {
                 let was_up = self.up.contains(&peer);
+                let speaks = self.speaks.get(&peer).copied();
                 // The link stays up, so the other end must hear that the switch is over: otherwise it keeps
                 // driving us, or keeps the keys we injected held down.
                 if was_up {
                     self.out.send(&peer, Msg::Release { seq, reason: Reason::TopologyChange });
                 }
-                self.link_down(&peer);
+                self.drop_peer(&peer, "its settings changed");
                 if was_up && new.is_some() {
+                    // Same link, so the same protocol: only a relink would tell it again.
+                    if let Some(v) = speaks {
+                        self.speaks.insert(peer.clone(), v);
+                    }
                     self.up.insert(peer);
                 }
             }
@@ -229,7 +321,7 @@ impl<S: InputSink, O: Outbox> Forwarder<S, O> {
             Mode::RemoteOut { peer, seq, exit_pos } => {
                 self.out.send(&peer, Msg::Release { seq, reason: Reason::TopologyChange });
                 let at = clamp_inside(&self.displays, exit_pos).unwrap_or(exit_pos);
-                self.restore_local(at);
+                self.restore_local(at, "this machine's displays changed");
             }
             Mode::RemoteIn { pos, .. } => {
                 if let Some(p) = clamp_inside(&self.displays, pos).filter(|p| *p != pos) {
@@ -252,14 +344,25 @@ impl<S: InputSink, O: Outbox> Forwarder<S, O> {
         self.up.insert(peer.to_string());
     }
 
+    /// The protocol version the link to `peer` negotiated. Unknown means the oldest: a message it cannot
+    /// decode would end the link.
+    pub fn peer_speaks(&mut self, peer: &str, ver: u16) {
+        self.speaks.insert(peer.to_string(), ver);
+    }
+
     /// A dropped link frees whatever it held: RemoteOut returns local at once, RemoteIn
     /// releases every injected key and button.
     pub fn link_down(&mut self, peer: &str) {
+        self.drop_peer(peer, "the link dropped");
+    }
+
+    fn drop_peer(&mut self, peer: &str, why: &str) {
         self.up.remove(peer);
         self.last_enter.remove(peer);
+        self.speaks.remove(peer);
         match self.mode.clone() {
-            Mode::RemoteOut { peer: p, exit_pos, .. } if p == peer => self.restore_local(exit_pos),
-            Mode::RemoteIn { peer: p, .. } if p == peer => self.leave_remote_in(),
+            Mode::RemoteOut { peer: p, exit_pos, .. } if p == peer => self.restore_local(exit_pos, why),
+            Mode::RemoteIn { peer: p, .. } if p == peer => self.leave_remote_in(why),
             Mode::Relay { from, to, to_seq, exit_pos, .. } if from == peer => {
                 self.out.send(&to, Msg::Release { seq: to_seq, reason: Reason::Shutdown });
                 self.end_relay_local(exit_pos);
@@ -276,7 +379,7 @@ impl<S: InputSink, O: Outbox> Forwarder<S, O> {
         if let Mode::RemoteOut { peer, seq, exit_pos } = self.mode.clone() {
             let edge = self.cfg.peers.iter().find(|x| x.name == peer).map(|x| x.edge).unwrap_or(Edge::Right);
             self.out.send(&peer, Msg::Leave { seq, edge, frac: FRAC_MID });
-            self.restore_local(exit_pos);
+            self.restore_local(exit_pos, "the cursor could not be grabbed");
         }
     }
 
@@ -289,14 +392,15 @@ impl<S: InputSink, O: Outbox> Forwarder<S, O> {
         let target = self.peer_at(pos);
         // Held without a file drag: the edge does not count, so the dwell starts only after the release.
         let held = target.is_some() && self.held_here && !self.sink.drag_started_here();
+        let holding = self.holding(now_ms);
         let fire = decide(
             &self.cfg.policy,
             &mut self.sw,
-            SwitchEvent::Cursor { pos, in_boundary: target.is_some() && !held },
+            SwitchEvent::Cursor { pos, in_boundary: target.is_some() && !held && !holding },
             now_ms,
         );
         if let (true, Some(i)) = (fire, target) {
-            self.enter_out(i, pos, None);
+            self.enter_out(i, pos, None, Landing::Edge, WayBack::Open);
         }
     }
 
@@ -307,6 +411,17 @@ impl<S: InputSink, O: Outbox> Forwarder<S, O> {
             self.on_cursor(self.last_pos, now_ms);
         }
         self.check_return(now_ms);
+    }
+
+    /// A resting cursor needs the clock only while an edge dwell can advance.
+    pub fn needs_tick(&self) -> bool {
+        match &self.mode {
+            Mode::Local => self.peer_at(self.last_pos).is_some() || self.sw.dwell_start.is_some(),
+            Mode::RemoteIn { edge, pos, ret, .. } => ret.dwell_start.is_some()
+                || (self.way_back == WayBack::Open && in_exit_strip(&self.displays, *pos, *edge, self.cfg.boundary_px))
+                || self.relay_at().is_some(),
+            Mode::RemoteOut { .. } | Mode::Relay { .. } => false,
+        }
     }
 
     pub fn on_captured(&mut self, ev: CapturedEvent, now_ms: u64) -> Disposition {
@@ -347,12 +462,15 @@ impl<S: InputSink, O: Outbox> Forwarder<S, O> {
                     let mods = self.keys.mods();
                     if decide(&self.cfg.policy, &mut self.sw, SwitchEvent::Key { hid, down, mods }, now_ms) {
                         self.out.send(&peer, Msg::Release { seq, reason: Reason::UserEscape });
-                        self.restore_local(exit_pos);
+                        self.restore_local(exit_pos, "the switch chord here");
                         return Disposition::Swallow;
                     }
                 }
                 let keys = self.cfg.peers.iter().find(|p| p.name == peer).map_or(KeyMap::None, |p| p.keys);
                 let mac = keys == KeyMap::Mac;
+                if matches!(ev, CapturedEvent::Key { down: true, .. } | CapturedEvent::Button { down: true, .. }) {
+                    self.gesture_keys.other_input();
+                }
                 let key_msg = |(hid, down): (u16, bool)| Msg::Key { seq, hid, down, repeat: false };
                 let mut msgs: Vec<Msg> = match ev {
                     CapturedEvent::Key { hid, down } if mac => self.mac_keys.key(hid, down).into_iter().map(key_msg).collect(),
@@ -366,6 +484,12 @@ impl<S: InputSink, O: Outbox> Forwarder<S, O> {
                     CapturedEvent::Button { button, down } => msgs.push(Msg::Button { seq, button, down }),
                     CapturedEvent::Motion { dx, dy } => msgs.push(Msg::MotionRel { seq, dx, dy }),
                     CapturedEvent::Wheel { dx, dy } => msgs.push(Msg::Wheel { seq, dx, dy }),
+                    CapturedEvent::Gesture(g) if !modifier_held(&self.keys.snapshot()) => {
+                        msgs.extend(self.gesture_msgs(&peer, seq, g));
+                    }
+                    CapturedEvent::Gesture(g) => {
+                        crate::log::line(&format!("flowseam: gesture {g:?} not sent to {peer}: a modifier is held"));
+                    }
                     CapturedEvent::Key { .. } => {}
                 }
                 for m in msgs {
@@ -382,7 +506,7 @@ impl<S: InputSink, O: Outbox> Forwarder<S, O> {
             return false;
         }
         match *ev {
-            CapturedEvent::Button { down: true, .. } | CapturedEvent::Wheel { .. } => true,
+            CapturedEvent::Button { down: true, .. } | CapturedEvent::Wheel { .. } | CapturedEvent::Gesture(_) => true,
             // Hold the emergency chord's modifier prefix until Esc can take priority.
             CapturedEvent::Key { hid, down: true } => !(0xE0..=0xE7).contains(&hid),
             CapturedEvent::Motion { dx, dy } => {
@@ -404,7 +528,7 @@ impl<S: InputSink, O: Outbox> Forwarder<S, O> {
         match self.mode.clone() {
             Mode::RemoteIn { peer, seq, .. } => {
                 self.out.send(&peer, Msg::Release { seq, reason: Reason::UserEscape });
-                self.leave_remote_in();
+                self.leave_remote_in("input here took over");
             }
             Mode::Relay { from, from_seq, to, to_seq, exit_pos, .. } => {
                 self.out.send(&from, Msg::Release { seq: from_seq, reason: Reason::UserEscape });
@@ -433,10 +557,17 @@ impl<S: InputSink, O: Outbox> Forwarder<S, O> {
         let target = self.peer_at(self.last_pos).or_else(|| self.first_up());
         let Some(i) = target else { return Disposition::Pass };
         let mods = self.keys.mods();
+        let before = self.sw;
         if decide(&self.cfg.policy, &mut self.sw, SwitchEvent::Key { hid, down, mods }, now_ms) {
+            if self.holding(now_ms) {
+                // A chord that switched nothing leaves the edge armed as it was.
+                self.sw = before;
+                crate::log::line("flowseam: switch chord ignored: a menu switch is moving the monitors");
+                return Disposition::Swallow;
+            }
             let pos = self.last_pos;
             // The chord key is swallowed here; it must not arrive as a held key and type on the peer.
-            self.enter_out(i, pos, Some(hid));
+            self.enter_out(i, pos, Some(hid), Landing::Center, WayBack::Open);
             return Disposition::Swallow;
         }
         Disposition::Pass
@@ -446,16 +577,22 @@ impl<S: InputSink, O: Outbox> Forwarder<S, O> {
         // The peer we relay into only drives the session's end. Its Enter still reaches on_enter, which
         // refuses it as Busy: unanswered, that peer would keep its keyboard and mouse grabbed.
         if matches!(&self.mode, Mode::Relay { to, .. } if to == peer)
-            && !matches!(&msg, Msg::Leave { .. } | Msg::Release { .. } | Msg::Enter { .. }) {
+            && !matches!(&msg, Msg::Leave { .. } | Msg::Release { .. } | Msg::Enter { .. } | Msg::EnterCentered { .. } | Msg::EnterCenteredClosed { .. }) {
             return;
         }
         if self.forward_relay(peer, &msg) {
             return;
         }
         match msg {
-            Msg::Enter { seq, edge, frac, pressed, .. } => self.on_enter(peer, seq, edge, frac, &pressed),
+            Msg::Enter { seq, edge, frac, pressed, .. } => self.on_enter(peer, seq, edge, frac, &pressed, Landing::Edge, WayBack::Open),
+            Msg::EnterCentered { seq, edge, frac, pressed, .. } => {
+                self.on_enter(peer, seq, edge, frac, &pressed, Landing::Center, WayBack::Open);
+            }
+            Msg::EnterCenteredClosed { seq, edge, frac, pressed, .. } => {
+                self.on_enter(peer, seq, edge, frac, &pressed, Landing::Center, WayBack::Closed);
+            }
             Msg::Leave { seq, frac, .. } => self.on_leave(peer, seq, frac),
-            Msg::Release { seq, .. } => self.on_release(peer, seq),
+            Msg::Release { seq, reason } => self.on_release(peer, seq, reason),
             Msg::ModSync { seq, pressed, .. } if self.live_in(peer, seq) => self.sync_injected(&pressed),
             Msg::MotionRel { seq, dx, dy } => {
                 if self.live_in(peer, seq) {
@@ -468,6 +605,7 @@ impl<S: InputSink, O: Outbox> Forwarder<S, O> {
                 if self.live_in(peer, seq) {
                     if down {
                         self.inj_btn.insert(button);
+                        self.gesture_keys.other_input();
                     } else {
                         self.inj_btn.remove(&button);
                     }
@@ -483,13 +621,59 @@ impl<S: InputSink, O: Outbox> Forwarder<S, O> {
                 }
             }
             Msg::Key { seq, hid, down, repeat } if self.live_in(peer, seq) => {
+                if down {
+                    self.gesture_keys.other_input();
+                }
                 self.inject_key(hid, down, repeat);
             }
+            Msg::Gesture { seq, gesture } if self.live_in(peer, seq) && !modifier_held(&self.inj_keys) => {
+                // ponytail: shortcuts here too, so a pinch zooms in steps and a swipe does not follow the
+                // fingers; replaying the gesture events themselves needs the macOS 27 field-4205 payload (iss).
+                let strokes = self.gesture_keys.strokes(gesture, Platform::here());
+                crate::log::line(&format!("flowseam: gesture {gesture:?} from {peer}: {strokes:?}"));
+                for s in strokes {
+                    match s {
+                        Stroke::Key(hid, down) => self.inject_key(hid, down, false),
+                        Stroke::Wheel(n) => self.sink.wheel(0, n),
+                    }
+                }
+            }
+            Msg::Gesture { gesture, .. } => crate::log::line(&format!(
+                "flowseam: gesture {gesture:?} from {peer} ignored: not its live session, or a modifier is held"
+            )),
             _ => {}
         }
     }
 
-    fn on_enter(&mut self, peer: &str, seq: u32, edge: Edge, frac: u16, pressed: &[u16]) {
+    /// What carries gesture `g` to `peer` in session `seq`: the gesture itself for a Mac that decodes it,
+    /// its shortcut for a PC, nothing for an older Mac. Callers drop a gesture made while a modifier is held
+    /// (`modifier_held`).
+    fn gesture_msgs(&mut self, peer: &str, seq: u32, g: Gesture) -> Vec<Msg> {
+        let found = self.cfg.peers.iter().find(|p| p.name == peer);
+        let keys = found.map_or(KeyMap::None, |p| p.keys);
+        // `None` is the map for a peer that is also a Mac; the other two are for a PC.
+        if keys == KeyMap::None {
+            let speaks = self.speaks.get(peer).copied();
+            if speaks.is_some_and(|v| v >= GESTURE_PROTO_VERSION) {
+                crate::log::line(&format!("flowseam: gesture {g:?} to {peer}"));
+                return vec![Msg::Gesture { seq, gesture: g }];
+            }
+            // An older Mac may be relaying to a PC: Mac shortcuts would land there as other keys (⌃← as a
+            // word jump, ⌘Space as the input method), so it gets nothing, as before gestures were carried.
+            crate::log::line(&format!("flowseam: gesture {g:?} not sent to {peer}: it speaks protocol {speaks:?}"));
+            return Vec::new();
+        }
+        let habit = found.map_or(Habit::Mac, |p| p.gestures.habit(keys));
+        let strokes = self.gesture_keys.strokes(g, Platform::Pc(habit));
+        crate::log::line(&format!("flowseam: gesture {g:?} to {peer} as {strokes:?}"));
+        strokes.into_iter().map(|s| match s {
+            Stroke::Key(hid, down) => Msg::Key { seq, hid, down, repeat: false },
+            Stroke::Wheel(n) => Msg::Wheel { seq, dx: 0, dy: n },
+        }).collect()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn on_enter(&mut self, peer: &str, seq: u32, edge: Edge, frac: u16, pressed: &[u16], landing: Landing, way_back: WayBack) {
         if let Some(&last) = self.last_enter.get(peer) {
             if (seq.wrapping_sub(last) as i32) <= 0 {
                 return; // a duplicate of a session already handled
@@ -504,7 +688,7 @@ impl<S: InputSink, O: Outbox> Forwarder<S, O> {
             }
         }
         if matches!(&self.mode, Mode::RemoteIn { peer: p, .. } if p == peer) {
-            self.leave_remote_in();
+            self.leave_remote_in("it started a newer session");
         }
         if !self.cfg.peers.iter().any(|p| p.name == peer) || !matches!(self.mode, Mode::Local) {
             // The sender has already hidden its cursor and grabbed its keyboard and mouse. Unanswered, it
@@ -513,15 +697,26 @@ impl<S: InputSink, O: Outbox> Forwarder<S, O> {
             return;
         }
         self.last_enter.insert(peer.to_string(), seq);
-        let Ok(pos) = entry_point(&self.displays, edge, frac) else {
+        let land = match landing {
+            Landing::Edge => entry_point(&self.displays, edge, frac),
+            Landing::Center => center_point(&self.displays, edge, frac),
+        };
+        let Ok(pos) = land else {
             self.out.send(peer, Msg::Leave { seq, edge: opposite(edge), frac });
             return;
         };
         self.sink.warp(pos);
         self.sink.set_association(false);
         self.sync_injected(pressed);
+        self.gesture_keys = GestureKeys::new();
         self.mode = Mode::RemoteIn { peer: peer.to_string(), seq, edge, pos, ret: SwitchState::new(pos) };
         self.takeover_motion = None;
+        self.way_back = way_back;
+        if way_back == WayBack::Closed {
+            crate::log::line(&format!(
+                "flowseam: {peer}'s displays all show this machine: its edge back is closed until this session ends (its chord, this machine's menu, or the emergency chord)"
+            ));
+        }
     }
 
     /// Make the injected key set equal `pressed`: release what the controller no longer holds, press the rest.
@@ -539,10 +734,11 @@ impl<S: InputSink, O: Outbox> Forwarder<S, O> {
 
     /// `Release` ends the session from either side, whatever the reason. Same effect as `Leave`, but it
     /// carries no landing position, so a controller comes home where it left.
-    fn on_release(&mut self, peer: &str, seq: u32) {
+    fn on_release(&mut self, peer: &str, seq: u32, reason: Reason) {
+        let why = format!("it released the session ({reason:?})");
         match self.mode.clone() {
-            Mode::RemoteOut { peer: p, seq: s, exit_pos } if p == peer && s == seq => self.restore_local(exit_pos),
-            Mode::RemoteIn { peer: p, seq: s, .. } if p == peer && s == seq => self.leave_remote_in(),
+            Mode::RemoteOut { peer: p, seq: s, exit_pos } if p == peer && s == seq => self.restore_local(exit_pos, &why),
+            Mode::RemoteIn { peer: p, seq: s, .. } if p == peer && s == seq => self.leave_remote_in(&why),
             Mode::Relay { from, from_seq, to, to_seq, exit_pos, edge, keys } if to == peer && to_seq == seq => {
                 self.resume_remote_in(from, from_seq, edge, exit_pos, keys);
             }
@@ -561,9 +757,9 @@ impl<S: InputSink, O: Outbox> Forwarder<S, O> {
                 let at = edge
                     .and_then(|e| entry_point(&self.displays, e, frac).ok())
                     .unwrap_or(exit_pos);
-                self.restore_local(at);
+                self.restore_local(at, "it handed control back (Leave: its edge or its emergency chord)");
             }
-            Mode::RemoteIn { peer: p, seq: s, .. } if p == peer && s == seq => self.leave_remote_in(),
+            Mode::RemoteIn { peer: p, seq: s, .. } if p == peer && s == seq => self.leave_remote_in("it let go (Leave)"),
             Mode::Relay { from, from_seq, edge, to, to_seq, exit_pos, keys } if to == peer && to_seq == seq => {
                 let at = self.cfg.peers.iter().find(|p| p.name == to)
                     .and_then(|p| entry_point(&self.displays, p.edge, frac).ok()).unwrap_or(exit_pos);
@@ -586,7 +782,7 @@ impl<S: InputSink, O: Outbox> Forwarder<S, O> {
         let Mode::Relay { from, from_seq, to, to_seq, keys, .. } = &mut self.mode else { return false };
         let incoming_seq = match msg {
             Msg::MotionRel { seq, .. } | Msg::Button { seq, .. } | Msg::Wheel { seq, .. }
-            | Msg::Key { seq, .. } | Msg::ModSync { seq, .. } => *seq,
+            | Msg::Key { seq, .. } | Msg::ModSync { seq, .. } | Msg::Gesture { seq, .. } => *seq,
             _ => return false,
         };
         if from != peer || incoming_seq != *from_seq {
@@ -595,7 +791,17 @@ impl<S: InputSink, O: Outbox> Forwarder<S, O> {
         let (to, seq) = (to.clone(), *to_seq);
         let map = self.cfg.peers.iter().find(|p| p.name == to).map_or(KeyMap::None, |p| p.keys);
         let key_msg = |(hid, down): (u16, bool)| Msg::Key { seq, hid, down, repeat: false };
+        if matches!(msg, Msg::Key { down: true, .. } | Msg::Button { down: true, .. }) {
+            self.gesture_keys.other_input();
+        }
         match msg {
+            Msg::Gesture { gesture, .. } => {
+                if !modifier_held(keys.iter()) {
+                    for m in self.gesture_msgs(&to, seq, *gesture) {
+                        self.out.send(&to, m);
+                    }
+                }
+            }
             Msg::MotionRel { dx, dy, .. } => self.out.send(&to, Msg::MotionRel { seq, dx: *dx, dy: *dy }),
             Msg::Button { .. } | Msg::Wheel { .. } if map == KeyMap::Mac => {
                 for m in self.mac_keys.pointer().into_iter().map(key_msg) {
@@ -658,12 +864,9 @@ impl<S: InputSink, O: Outbox> Forwarder<S, O> {
         // A press injected here and still held keeps the cursor here unless it started a file drag. A drag
         // that crossed in already held left no injected press, so it can always be carried back.
         let held = self.inj_btn.contains(&PRIMARY_BUTTON) && !self.sink.drag_started_here();
-        let relay = if let Mode::RemoteIn { peer, edge, pos, .. } = &self.mode {
-            self.cfg.peers.iter().position(|p| p.name != *peer && p.edge != *edge && self.up.contains(&p.name)
-                && in_exit_strip(&self.displays, *pos, p.edge, self.cfg.boundary_px))
-        } else { None };
+        let relay = self.relay_at();
         let Mode::RemoteIn { peer, seq, edge, pos, ret } = &mut self.mode else { return };
-        let returning = in_exit_strip(&self.displays, *pos, *edge, self.cfg.boundary_px);
+        let returning = self.way_back == WayBack::Open && in_exit_strip(&self.displays, *pos, *edge, self.cfg.boundary_px);
         let in_boundary = (!held && returning) || (relay.is_some() && self.inj_btn.is_empty());
         if !decide(&self.cfg.policy, ret, SwitchEvent::Cursor { pos: *pos, in_boundary }, now_ms) {
             return;
@@ -680,7 +883,7 @@ impl<S: InputSink, O: Outbox> Forwarder<S, O> {
         self.sink.drag_away(&peer);
         let frac = frac_at(&self.displays, pos, edge);
         self.out.send(&peer, Msg::Leave { seq, edge: opposite(edge), frac });
-        self.leave_remote_in();
+        self.leave_remote_in("the cursor went back through the edge");
     }
 
     fn enter_relay(&mut self, from: String, from_seq: u32, edge: Edge, idx: usize, pos: Point) {
@@ -691,6 +894,7 @@ impl<S: InputSink, O: Outbox> Forwarder<S, O> {
         let mut held: Vec<u16> = keys.iter().copied().collect();
         held.sort_by_key(|h| !(0xE0..=0xE7).contains(h));
         self.mac_keys = MacShortcuts::new();
+        self.gesture_keys = GestureKeys::new();
         let pressed = if spec.keys == KeyMap::Mac {
             self.mac_keys = MacShortcuts::with_held(&held);
             self.mac_keys.pressed()
@@ -726,7 +930,7 @@ impl<S: InputSink, O: Outbox> Forwarder<S, O> {
         self.go_local(at);
     }
 
-    fn enter_out(&mut self, idx: usize, pos: Point, skip_key: Option<u16>) {
+    fn enter_out(&mut self, idx: usize, pos: Point, skip_key: Option<u16>, landing: Landing, way_back: WayBack) {
         let spec = self.cfg.peers[idx].clone();
         self.crossed_holding = self.held_here;
         self.held_here = false;
@@ -735,6 +939,7 @@ impl<S: InputSink, O: Outbox> Forwarder<S, O> {
         let seq = self.next_seq;
         let mut held: Vec<u16> = self.keys.snapshot().into_iter().filter(|h| Some(*h) != skip_key).collect();
         self.mac_keys = MacShortcuts::new();
+        self.gesture_keys = GestureKeys::new();
         let pressed: Vec<u16> = if spec.keys == KeyMap::Mac {
             // Modifiers first, so a key held while crossing is translated under them.
             held.sort_by_key(|h| !(0xE0..=0xE7).contains(h));
@@ -743,16 +948,33 @@ impl<S: InputSink, O: Outbox> Forwarder<S, O> {
         } else {
             held.into_iter().map(|h| spec.keys.apply(h)).collect()
         };
-        self.out.send(
-            &spec.name,
-            Msg::Enter {
-                seq,
-                edge: opposite(spec.edge),
-                frac: frac_at(&self.displays, pos, spec.edge),
-                mods: mods_of(&pressed, self.keys.mods().contains(ModifierSet::CAPS)),
-                pressed,
-            },
-        );
+        let (edge, frac) = (opposite(spec.edge), frac_at(&self.displays, pos, spec.edge));
+        let mods = mods_of(&pressed, self.keys.mods().contains(ModifierSet::CAPS));
+        let speaks = self.speaks.get(&spec.name).copied();
+        let msg = match landing {
+            Landing::Center if way_back == WayBack::Closed && speaks.is_some_and(|v| v >= CLOSED_PROTO_VERSION) => {
+                Msg::EnterCenteredClosed { seq, edge, frac, mods, pressed }
+            }
+            Landing::Center if speaks.is_some_and(|v| v >= CENTERED_PROTO_VERSION) => {
+                if way_back == WayBack::Closed {
+                    crate::log::line(&format!(
+                        "flowseam: {} speaks protocol {speaks:?}: its edge back here stays open, though every display here shows it",
+                        spec.name
+                    ));
+                }
+                Msg::EnterCentered { seq, edge, frac, mods, pressed }
+            }
+            Landing::Center => {
+                crate::log::line(&format!(
+                    "flowseam: {} speaks protocol {speaks:?}: its cursor lands at the edge, not in the middle{}",
+                    spec.name,
+                    if way_back == WayBack::Closed { ", and its edge back here stays open" } else { "" }
+                ));
+                Msg::Enter { seq, edge, frac, mods, pressed }
+            }
+            Landing::Edge => Msg::Enter { seq, edge, frac, mods, pressed },
+        };
+        self.out.send(&spec.name, msg);
         self.sink.set_grab(true);
         self.sink.hide();
         self.mode = Mode::RemoteOut { peer: spec.name, seq, exit_pos: pos };
@@ -764,11 +986,11 @@ impl<S: InputSink, O: Outbox> Forwarder<S, O> {
             Mode::RemoteOut { peer, seq, exit_pos } => {
                 let edge = self.cfg.peers.iter().find(|x| x.name == peer).map(|x| x.edge).unwrap_or(Edge::Right);
                 self.out.send(&peer, Msg::Leave { seq, edge, frac: FRAC_MID });
-                self.restore_local(exit_pos);
+                self.restore_local(exit_pos, "the emergency chord or a release here");
             }
             Mode::RemoteIn { peer, seq, edge, .. } => {
                 self.out.send(&peer, Msg::Leave { seq, edge: opposite(edge), frac: FRAC_MID });
-                self.leave_remote_in();
+                self.leave_remote_in("the emergency chord or a release here");
             }
             Mode::Relay { from, from_seq, edge, to, to_seq, exit_pos, .. } => {
                 self.out.send(&to, Msg::Release { seq: to_seq, reason: Reason::UserEscape });
@@ -779,7 +1001,11 @@ impl<S: InputSink, O: Outbox> Forwarder<S, O> {
         }
     }
 
-    fn restore_local(&mut self, at: Point) {
+    /// RemoteOut to Local. `why` goes to the log: which of the many ways a session ends was this one.
+    fn restore_local(&mut self, at: Point, why: &str) {
+        if let Mode::RemoteOut { peer, .. } = &self.mode {
+            crate::log::line(&format!("flowseam: control back from {peer}: {why}"));
+        }
         self.sink.set_grab(false);
         self.sink.show();
         self.sink.warp(at);
@@ -791,7 +1017,11 @@ impl<S: InputSink, O: Outbox> Forwarder<S, O> {
         self.go_local(at);
     }
 
-    fn leave_remote_in(&mut self) {
+    /// RemoteIn to Local; `why` goes to the log, as for `restore_local`.
+    fn leave_remote_in(&mut self, why: &str) {
+        if let Mode::RemoteIn { peer, .. } = &self.mode {
+            crate::log::line(&format!("flowseam: control returned to {peer}: {why}"));
+        }
         for k in std::mem::take(&mut self.inj_keys) {
             self.sink.key(k, false, false);
         }
@@ -822,9 +1052,21 @@ impl<S: InputSink, O: Outbox> Forwarder<S, O> {
         })
     }
 
+    fn relay_at(&self) -> Option<usize> {
+        let Mode::RemoteIn { peer, edge, pos, .. } = &self.mode else { return None };
+        self.cfg.peers.iter().position(|p| p.name != *peer && p.edge != *edge && self.up.contains(&p.name)
+            && in_exit_strip(&self.displays, *pos, p.edge, self.cfg.boundary_px))
+    }
+
     fn first_up(&self) -> Option<usize> {
         self.cfg.peers.iter().position(|p| self.up.contains(&p.name))
     }
+}
+
+/// A gesture made while one of these is held does nothing: its shortcut would press and release that
+/// modifier under the user's own hold, and the peer would lose it (or the shortcut would gain it).
+fn modifier_held<'a>(keys: impl IntoIterator<Item = &'a u16>) -> bool {
+    keys.into_iter().any(|k| (0xE0..=0xE7).contains(k))
 }
 
 /// The modifier set a peer sees for these held usages (after mapping), plus CapsLock's toggle.
@@ -937,7 +1179,7 @@ mod tests {
     }
     fn cfg(edge: Edge) -> FwdConfig {
         FwdConfig {
-            peers: vec![PeerSpec { name: "b".into(), edge, keys: KeyMap::None }],
+            peers: vec![PeerSpec { name: "b".into(), edge, keys: KeyMap::None, gestures: Default::default() }],
             policy: SwitchPolicy::default(),
             boundary_px: 2,
         }
@@ -964,6 +1206,39 @@ mod tests {
             Mode::RemoteOut { seq, .. } => *seq,
             m => panic!("expected RemoteOut, got {m:?}"),
         }
+    }
+
+    #[test]
+    fn tick_is_needed_only_at_a_live_edge_or_active_dwell() {
+        let mut f = fwd(Edge::Right);
+        f.on_cursor(Point { x: W / 2, y: H / 2 }, 0);
+        assert!(!f.needs_tick(), "local middle");
+        f.on_cursor(right_edge(), 1);
+        assert!(f.needs_tick(), "linked local edge");
+        f.mode = Mode::RemoteOut { peer: "b".into(), seq: 1, exit_pos: right_edge() };
+        assert!(!f.needs_tick(), "remote out");
+
+        let mut f = fwd(Edge::Left);
+        go_in(&mut f, 7, vec![]);
+        assert!(!f.needs_tick(), "remote in middle");
+        f.on_msg("b", Msg::MotionRel { seq: 7, dx: -1000, dy: 0 }, 10);
+        assert!(f.needs_tick(), "remote in exit strip");
+    }
+
+    #[test]
+    fn a_resting_dwell_needs_a_tick_before_it_completes() {
+        let mut local = fwd(Edge::Right);
+        local.on_cursor(right_edge(), 0);
+        assert!(local.needs_tick());
+        local.tick(200);
+        assert!(matches!(local.mode(), Mode::RemoteOut { .. }));
+
+        let mut incoming = fwd(Edge::Left);
+        go_in(&mut incoming, 7, vec![]);
+        incoming.on_msg("b", Msg::MotionRel { seq: 7, dx: -1000, dy: 0 }, 1000);
+        assert!(incoming.needs_tick());
+        incoming.tick(1200);
+        assert!(matches!(incoming.mode(), Mode::Local));
     }
     /// Receiver (peer to the left of the sender) with an active session `seq`.
     fn go_in(f: &mut Forwarder<Rec, Mail>, seq: u32, pressed: Vec<u16>) {
@@ -1046,6 +1321,22 @@ mod tests {
         f.tick(2100);
         assert!(matches!(f.mode(), Mode::Local), "the dwell starts at the release, not before");
         f.tick(2400);
+        assert!(matches!(f.mode(), Mode::RemoteOut { .. }), "{:?}", f.mode());
+    }
+
+    /// A release is not a cursor event: a press let go at the edge starts its dwell only on the clock, so a
+    /// cursor resting in the strip needs ticks before any dwell runs.
+    #[test]
+    fn a_cursor_resting_in_the_strip_needs_ticks_before_its_dwell_starts() {
+        let mut f = fwd(Edge::Right);
+        f.sink_mut().1 = true;
+        f.on_captured(CapturedEvent::Button { button: LEFT, down: true }, 0);
+        f.on_cursor(right_edge(), 0);
+        f.on_captured(CapturedEvent::Button { button: LEFT, down: false }, 100);
+        assert!(f.sw.dwell_start.is_none(), "no dwell yet at the release");
+        assert!(f.needs_tick());
+        f.tick(150);
+        f.tick(500);
         assert!(matches!(f.mode(), Mode::RemoteOut { .. }), "{:?}", f.mode());
     }
 
@@ -1278,6 +1569,319 @@ mod tests {
     }
 
     #[test]
+    fn switch_to_connected_peer_enters_remote_out() {
+        let mut f = fwd(Edge::Right);
+        assert_eq!(f.switch_to("b", WayBack::Open), SwitchTo::Switched);
+        assert!(matches!(f.mode(), Mode::RemoteOut { peer, .. } if peer == "b"));
+        assert!(matches!(f.out().0.last(), Some((peer, Msg::Enter { .. })) if peer == "b"));
+    }
+
+    fn chord(f: &mut Forwarder<Rec, Mail>) -> Disposition {
+        for h in [CTRL, ALT, GUI] {
+            key(f, h, true);
+        }
+        key(f, 0x16, true)
+    }
+
+    #[test]
+    fn a_switch_through_no_edge_asks_for_a_centered_landing_where_the_peer_reads_it() {
+        // From the menu bar icon, top right: the old Enter put the PC's cursor 24 px from the way back.
+        let menu = Point { x: W - 200, y: 10 };
+        let mut f = fwd(Edge::Right);
+        f.peer_speaks("b", CENTERED_PROTO_VERSION);
+        f.on_cursor(menu, 0);
+        assert_eq!(f.switch_to("b", WayBack::Open), SwitchTo::Switched);
+        assert!(matches!(msgs(&f).last(), Some(Msg::EnterCentered { edge: Edge::Left, .. })), "{:?}", msgs(&f));
+        assert!(matches!(f.mode(), Mode::RemoteOut { exit_pos, .. } if *exit_pos == menu));
+
+        let mut c = fwd(Edge::Right);
+        c.peer_speaks("b", CENTERED_PROTO_VERSION);
+        assert_eq!(chord(&mut c), Disposition::Swallow);
+        let Some(Msg::EnterCentered { pressed, .. }) = msgs(&c).pop() else { panic!("{:?}", msgs(&c)) };
+        assert_eq!(pressed, vec![CTRL, ALT, GUI]);
+
+        // Through the edge it stays an edge entry.
+        let mut e = fwd(Edge::Right);
+        e.peer_speaks("b", CENTERED_PROTO_VERSION);
+        go_out(&mut e);
+        assert!(matches!(msgs(&e).last(), Some(Msg::Enter { .. })), "{:?}", msgs(&e));
+
+        // A peer that cannot decode it, or whose version is unknown, gets the plain Enter it understands.
+        for speaks in [Some(CENTERED_PROTO_VERSION - 1), None] {
+            let mut old = fwd(Edge::Right);
+            if let Some(v) = speaks {
+                old.peer_speaks("b", v);
+            }
+            assert_eq!(old.switch_to("b", WayBack::Open), SwitchTo::Switched);
+            assert!(matches!(msgs(&old).last(), Some(Msg::Enter { .. })), "{speaks:?}: {:?}", msgs(&old));
+        }
+    }
+
+    #[test]
+    fn a_centered_entry_survives_the_hand_moving_back_toward_the_way_back() {
+        let leftward = |f: &mut Forwarder<Rec, Mail>, seq: u32| {
+            // The hand drifting back the way it came, 100 px over 300 ms, then at rest.
+            for t in 1..=10 {
+                f.on_msg("b", Msg::MotionRel { seq, dx: -10, dy: 0 }, t * 30);
+            }
+            f.tick(1000);
+        };
+        let mut f = fwd(Edge::Left);
+        f.on_msg("b", Msg::EnterCentered { seq: 7, edge: Edge::Left, frac: FRAC_MID, mods: ModifierSet(0), pressed: vec![] }, 0);
+        assert!(f.sink().0.contains(&Fx::Warp(Point { x: W / 2, y: H / 2 })), "{:?}", f.sink().0);
+        leftward(&mut f, 7);
+        assert!(matches!(f.mode(), Mode::RemoteIn { .. }), "{:?}", f.mode());
+        assert!(f.out().0.is_empty(), "{:?}", f.out().0);
+
+        // The same hand after an edge entry is back where it came from: what the menu switch used to do.
+        let mut edge = fwd(Edge::Left);
+        edge.on_msg("b", Msg::Enter { seq: 7, edge: Edge::Left, frac: FRAC_MID, mods: ModifierSet(0), pressed: vec![] }, 0);
+        leftward(&mut edge, 7);
+        assert!(matches!(edge.mode(), Mode::Local));
+
+        // The edge is still the way back, for a push that means it.
+        f.on_msg("b", Msg::MotionRel { seq: 7, dx: -W, dy: 0 }, 2000);
+        f.tick(2200);
+        assert!(matches!(f.mode(), Mode::Local));
+        assert!(matches!(msgs(&f).last(), Some(Msg::Leave { seq: 7, edge: Edge::Right, .. })), "{:?}", msgs(&f));
+    }
+
+    #[test]
+    fn a_menu_switch_in_flight_holds_the_edges_and_the_chord_but_not_itself() {
+        let mut f = fwd(Edge::Right);
+        f.hold_for_switch(true, 0);
+        dwell(&mut f, right_edge(), 0);
+        f.tick(1000);
+        assert!(matches!(f.mode(), Mode::Local));
+        assert_eq!(chord(&mut f), Disposition::Swallow);
+        assert!(matches!(f.mode(), Mode::Local));
+        assert!(f.out().0.is_empty() && !f.sink().0.contains(&Fx::Grab(true)), "{:?}", f.out().0);
+        assert_eq!(f.switch_to("b", WayBack::Open), SwitchTo::Switched);
+        assert!(matches!(f.mode(), Mode::RemoteOut { .. }));
+
+        // Lifted, the edge works again from where the cursor rests.
+        let mut g = fwd(Edge::Right);
+        g.hold_for_switch(true, 0);
+        dwell(&mut g, right_edge(), 0);
+        g.hold_for_switch(false, 300);
+        dwell(&mut g, right_edge(), 300);
+        assert!(matches!(g.mode(), Mode::RemoteOut { .. }));
+
+        // A chord pressed while held switches nothing and leaves the edge armed: it works once lifted.
+        let mut k = fwd(Edge::Right);
+        k.hold_for_switch(true, 0);
+        assert_eq!(chord(&mut k), Disposition::Swallow);
+        k.hold_for_switch(false, 100);
+        dwell(&mut k, right_edge(), 100);
+        assert!(matches!(k.mode(), Mode::RemoteOut { .. }), "{:?}", k.mode());
+
+        // Never lifted, it lapses; holding again each turn does not restart its clock.
+        let mut h = fwd(Edge::Right);
+        h.hold_for_switch(true, 0);
+        h.hold_for_switch(true, SWITCH_HOLD_LIMIT_MS - 1);
+        dwell(&mut h, right_edge(), SWITCH_HOLD_LIMIT_MS - 200);
+        assert!(matches!(h.mode(), Mode::Local), "still held");
+        dwell(&mut h, right_edge(), SWITCH_HOLD_LIMIT_MS);
+        assert!(matches!(h.mode(), Mode::RemoteOut { .. }));
+    }
+
+    #[test]
+    fn a_settings_change_keeps_the_protocol_the_link_speaks() {
+        let mut f = fwd(Edge::Right);
+        f.peer_speaks("b", CENTERED_PROTO_VERSION);
+        go_out(&mut f);
+        let mut changed = cfg(Edge::Right);
+        changed.peers[0].keys = KeyMap::Position;
+        f.set_config(changed);
+        assert!(matches!(f.mode(), Mode::Local));
+        assert_eq!(f.switch_to("b", WayBack::Open), SwitchTo::Switched);
+        assert!(matches!(msgs(&f).last(), Some(Msg::EnterCentered { .. })), "{:?}", msgs(&f));
+    }
+
+    #[test]
+    fn a_centered_enter_that_cannot_be_taken_is_refused_like_an_enter() {
+        let centered = |seq| Msg::EnterCentered { seq, edge: Edge::Left, frac: FRAC_MID, mods: ModifierSet(0), pressed: vec![] };
+        let mut busy = fwd(Edge::Right);
+        go_out(&mut busy);
+        busy.on_msg("b", centered(77), 10);
+        assert!(matches!(busy.mode(), Mode::RemoteOut { .. }));
+        assert_eq!(msgs(&busy).last(), Some(&Msg::Release { seq: 77, reason: Reason::Busy }));
+        // The peer this machine relays into reaches on_enter too, and hears it.
+        let mut relay = relay_fwd(KeyMap::None);
+        let seq = start_relay(&mut relay, vec![]);
+        relay.on_msg("c", centered(50), 1300);
+        assert_eq!(relay.out().0.last(), Some(&("c".into(), Msg::Release { seq: 50, reason: Reason::Busy })));
+        assert!(matches!(relay.mode(), Mode::Relay { to_seq, .. } if *to_seq == seq));
+    }
+
+    #[test]
+    fn a_switch_that_moved_every_display_closes_the_way_back_where_the_peer_reads_it() {
+        let mut f = fwd(Edge::Right);
+        f.peer_speaks("b", CLOSED_PROTO_VERSION);
+        assert_eq!(f.switch_to("b", WayBack::Closed), SwitchTo::Switched);
+        assert!(matches!(msgs(&f).last(), Some(Msg::EnterCenteredClosed { edge: Edge::Left, .. })), "{:?}", msgs(&f));
+        assert!(matches!(f.mode(), Mode::RemoteOut { .. }));
+
+        // Open, a peer that reads protocol 9 still gets the plain centered entry.
+        let mut open = fwd(Edge::Right);
+        open.peer_speaks("b", CLOSED_PROTO_VERSION);
+        assert_eq!(open.switch_to("b", WayBack::Open), SwitchTo::Switched);
+        assert!(matches!(msgs(&open).last(), Some(Msg::EnterCentered { .. })), "{:?}", msgs(&open));
+
+        // Older peers get what they decode: their way back stays open.
+        for speaks in [Some(CLOSED_PROTO_VERSION - 1), Some(CENTERED_PROTO_VERSION - 1), None] {
+            let mut old = fwd(Edge::Right);
+            if let Some(v) = speaks {
+                old.peer_speaks("b", v);
+            }
+            assert_eq!(old.switch_to("b", WayBack::Closed), SwitchTo::Switched);
+            let last = msgs(&old).pop();
+            let centered = speaks.is_some_and(|v| v >= CENTERED_PROTO_VERSION);
+            assert!(
+                if centered { matches!(last, Some(Msg::EnterCentered { .. })) } else { matches!(last, Some(Msg::Enter { .. })) },
+                "{speaks:?}: {last:?}"
+            );
+        }
+    }
+
+    /// Driven from the left, a push all the way through the edge, then the hand at rest. The first step
+    /// stays outside the strip, so a dwell that must rearm first (after a relay) can.
+    fn push_through_left(f: &mut Forwarder<Rec, Mail>, seq: u32, t: u64) {
+        f.on_msg("b", Msg::MotionRel { seq, dx: -10, dy: 0 }, t);
+        f.on_msg("b", Msg::MotionRel { seq, dx: -2 * W, dy: 0 }, t + 10);
+        f.tick(t + 200);
+        f.tick(t + 1000);
+    }
+
+    #[test]
+    fn a_closed_way_back_keeps_a_push_through_the_edge_here() {
+        let closed = |seq| Msg::EnterCenteredClosed { seq, edge: Edge::Left, frac: FRAC_MID, mods: ModifierSet(0), pressed: vec![] };
+        let mut f = fwd(Edge::Left);
+        f.on_msg("b", closed(7), 0);
+        push_through_left(&mut f, 7, 100);
+        assert!(matches!(f.mode(), Mode::RemoteIn { pos, .. } if pos.x == 0), "{:?}", f.mode());
+        assert!(f.out().0.is_empty(), "{:?}", f.out().0);
+        assert!(!f.needs_tick(), "a cursor resting at a closed edge has no dwell to finish");
+
+        // The same push after an open centered entry goes back: the way back is what decides.
+        let mut open = fwd(Edge::Left);
+        open.on_msg("b", Msg::EnterCentered { seq: 7, edge: Edge::Left, frac: FRAC_MID, mods: ModifierSet(0), pressed: vec![] }, 0);
+        push_through_left(&mut open, 7, 100);
+        assert!(matches!(open.mode(), Mode::Local), "{:?}", open.mode());
+        assert!(matches!(msgs(&open).last(), Some(Msg::Leave { seq: 7, edge: Edge::Right, .. })), "{:?}", msgs(&open));
+
+        // The controller's chord still ends it, and the next session's way back is open again.
+        f.on_msg("b", Msg::Release { seq: 7, reason: Reason::UserEscape }, 2000);
+        assert!(matches!(f.mode(), Mode::Local));
+        f.on_msg("b", Msg::Enter { seq: 8, edge: Edge::Left, frac: FRAC_MID, mods: ModifierSet(0), pressed: vec![] }, 2100);
+        push_through_left(&mut f, 8, 2200);
+        assert!(matches!(f.mode(), Mode::Local), "{:?}", f.mode());
+        assert!(matches!(msgs(&f).last(), Some(Msg::Leave { seq: 8, .. })), "{:?}", msgs(&f));
+
+        // This machine's menu still hands control back while closed.
+        let mut menu = fwd(Edge::Left);
+        menu.on_msg("b", closed(7), 0);
+        assert!(menu.release_control());
+        assert!(matches!(menu.mode(), Mode::Local));
+        assert!(matches!(msgs(&menu).last(), Some(Msg::Leave { seq: 7, .. })), "{:?}", msgs(&menu));
+
+        // Another peer's entry, refused as busy, leaves this session's way back as it was.
+        let mut two = relay_fwd(KeyMap::None);
+        two.on_msg("b", closed(7), 0);
+        two.on_msg("c", Msg::EnterCentered { seq: 3, edge: Edge::Right, frac: FRAC_MID, mods: ModifierSet(0), pressed: vec![] }, 50);
+        assert_eq!(two.out().0.last(), Some(&("c".into(), Msg::Release { seq: 3, reason: Reason::Busy })));
+        push_through_left(&mut two, 7, 100);
+        assert!(matches!(two.mode(), Mode::RemoteIn { peer, .. } if peer == "b"), "{:?}", two.mode());
+    }
+
+    #[test]
+    fn a_closed_way_back_survives_a_relay_and_its_return() {
+        for (way_back, stays) in [(WayBack::Closed, true), (WayBack::Open, false)] {
+            let mut f = relay_fwd(KeyMap::None);
+            let enter = match way_back {
+                WayBack::Closed => Msg::EnterCenteredClosed { seq: 7, edge: Edge::Left, frac: FRAC_MID, mods: ModifierSet(0), pressed: vec![] },
+                WayBack::Open => Msg::EnterCentered { seq: 7, edge: Edge::Left, frac: FRAC_MID, mods: ModifierSet(0), pressed: vec![] },
+            };
+            f.on_msg("b", enter, 0);
+            f.on_msg("b", Msg::MotionRel { seq: 7, dx: 2 * W, dy: 0 }, 1000);
+            f.tick(1200);
+            let Mode::Relay { to_seq, .. } = f.mode().clone() else { panic!("{way_back:?}: {:?}", f.mode()) };
+            f.on_msg("c", Msg::Leave { seq: to_seq, edge: Edge::Left, frac: FRAC_MID }, 1300);
+            assert!(matches!(f.mode(), Mode::RemoteIn { .. }), "{way_back:?}: {:?}", f.mode());
+            push_through_left(&mut f, 7, 1400);
+            assert_eq!(matches!(f.mode(), Mode::RemoteIn { .. }), stays, "{way_back:?}: {:?}", f.mode());
+        }
+    }
+
+    #[test]
+    fn can_switch_to_answers_without_switching() {
+        let mut f = fwd(Edge::Right);
+        assert_eq!(f.can_switch_to("b"), SwitchTo::Switched);
+        assert!(matches!(f.mode(), Mode::Local));
+        assert!(f.out().0.is_empty());
+        assert_eq!(f.can_switch_to("nope"), SwitchTo::UnknownPeer);
+        go_out(&mut f);
+        assert_eq!(f.can_switch_to("b"), SwitchTo::NotLocal);
+        let down = Forwarder::new(cfg(Edge::Right), screen(), Rec::default(), Mail::default());
+        assert_eq!(down.can_switch_to("b"), SwitchTo::PeerDown);
+    }
+
+    #[test]
+    fn switch_to_disconnected_peer_does_nothing() {
+        let mut f = Forwarder::new(cfg(Edge::Right), screen(), Rec::default(), Mail::default());
+        assert_eq!(f.switch_to("b", WayBack::Open), SwitchTo::PeerDown);
+        assert!(matches!(f.mode(), Mode::Local));
+        assert!(f.out().0.is_empty());
+    }
+
+    #[test]
+    fn switch_to_unknown_peer_does_nothing() {
+        let mut f = fwd(Edge::Right);
+        assert_eq!(f.switch_to("nope", WayBack::Open), SwitchTo::UnknownPeer);
+        assert!(matches!(f.mode(), Mode::Local));
+        assert!(f.out().0.is_empty());
+    }
+
+    #[test]
+    fn switch_to_while_remote_out_does_nothing() {
+        let mut f = fwd(Edge::Right);
+        go_out(&mut f);
+        let mode = f.mode().clone();
+        let sent = f.out().0.len();
+        assert_eq!(f.switch_to("b", WayBack::Open), SwitchTo::NotLocal);
+        assert_eq!(f.mode(), &mode);
+        assert_eq!(f.out().0.len(), sent);
+    }
+
+    #[test]
+    fn release_control_from_remote_in_releases_injected_key() {
+        let mut f = fwd(Edge::Left);
+        go_in(&mut f, 3, vec![]);
+        f.on_msg("b", Msg::Key { seq: 3, hid: 0x04, down: true, repeat: false }, 1);
+        assert!(f.release_control());
+        assert!(matches!(f.mode(), Mode::Local));
+        assert!(matches!(f.out().0.last(), Some((peer, Msg::Leave { seq: 3, .. })) if peer == "b"));
+        assert!(f.sink().0.contains(&Fx::Key(0x04, false)));
+    }
+
+    #[test]
+    fn release_control_from_remote_out_sends_leave() {
+        let mut f = fwd(Edge::Right);
+        let seq = go_out(&mut f);
+        assert!(f.release_control());
+        assert!(matches!(f.mode(), Mode::Local));
+        assert!(matches!(f.out().0.last(), Some((peer, Msg::Leave { seq: s, .. })) if peer == "b" && *s == seq));
+    }
+
+    #[test]
+    fn release_control_in_local_does_nothing() {
+        let mut f = fwd(Edge::Right);
+        assert!(!f.release_control());
+        assert!(matches!(f.mode(), Mode::Local));
+        assert!(f.out().0.is_empty());
+    }
+
+    #[test]
     fn events_after_enter_are_forwarded_in_order_and_swallowed() {
         let mut f = fwd(Edge::Right);
         let seq = go_out(&mut f);
@@ -1485,7 +2089,7 @@ mod tests {
     #[test]
     fn changing_another_peers_edge_keeps_the_active_session() {
         let mut original = cfg(Edge::Right);
-        original.peers.push(PeerSpec { name: "c".into(), edge: Edge::Left, keys: KeyMap::None });
+        original.peers.push(PeerSpec { name: "c".into(), edge: Edge::Left, keys: KeyMap::None, gestures: Default::default() });
         let mut f = Forwarder::new(original.clone(), screen(), Rec::default(), Mail::default());
         f.link_up("b");
         f.link_up("c");
@@ -1521,7 +2125,7 @@ mod tests {
     fn added_peer_can_be_switched_to_after_link_up() {
         let mut f = fwd(Edge::Right);
         let mut changed = cfg(Edge::Right);
-        changed.peers.push(PeerSpec { name: "c".into(), edge: Edge::Left, keys: KeyMap::None });
+        changed.peers.push(PeerSpec { name: "c".into(), edge: Edge::Left, keys: KeyMap::None, gestures: Default::default() });
         f.set_config(changed);
         f.link_up("c");
         dwell(&mut f, left_edge(), 0);
@@ -1767,16 +2371,18 @@ mod tests {
             edge: crate::config::Edge::Top,
             fingerprint: "0".repeat(64),
             keys: crate::config::KeyMap::Mac,
+            gestures: crate::config::GestureMap::Windows,
+            displays: Vec::new(),
         });
         let f = FwdConfig::from_config(&c).unwrap();
-        assert_eq!(f.peers, vec![PeerSpec { name: "b".into(), edge: Edge::Top, keys: crate::config::KeyMap::Mac }]);
+        assert_eq!(f.peers, vec![PeerSpec { name: "b".into(), edge: Edge::Top, keys: crate::config::KeyMap::Mac, gestures: GestureMap::Windows }]);
         c.switch.chord = "bogus".into();
         assert!(FwdConfig::from_config(&c).is_err());
     }
 
     fn relay_fwd(map: KeyMap) -> Forwarder<Rec, Mail> {
         let mut config = cfg(Edge::Left);
-        config.peers.push(PeerSpec { name: "c".into(), edge: Edge::Right, keys: map });
+        config.peers.push(PeerSpec { name: "c".into(), edge: Edge::Right, keys: map, gestures: Default::default() });
         let mut f = Forwarder::new(config, screen(), Rec::default(), Mail::default());
         f.link_up("b");
         f.link_up("c");
@@ -2070,5 +2676,166 @@ mod tests {
         f.abort_switch();
         assert!(matches!(f.mode(), Mode::Relay { to_seq, .. } if *to_seq == seq));
         assert_eq!(f.out().0.len(), 1);
+    }
+
+    const LEFT_ARROW: u16 = 0x50;
+    const TAB: u16 = 0x2B;
+
+    fn chord_msgs(seq: u32, keys: &[u16]) -> Vec<Msg> {
+        let key = |hid, down| Msg::Key { seq, hid, down, repeat: false };
+        keys.iter().map(|&k| key(k, true)).chain(keys.iter().rev().map(|&k| key(k, false))).collect()
+    }
+
+    #[test]
+    fn a_gesture_goes_as_itself_only_to_a_mac_that_decodes_it() {
+        let mut f = fwd(Edge::Right);
+        f.peer_speaks("b", GESTURE_PROTO_VERSION);
+        let seq = go_out(&mut f);
+        let n = f.out().0.len();
+        assert_eq!(f.on_captured(CapturedEvent::Gesture(Gesture::SpaceRight), 300), Disposition::Swallow);
+        assert_eq!(&msgs(&f)[n..], &[Msg::Gesture { seq, gesture: Gesture::SpaceRight }]);
+
+        // An older Mac would end the link on a Gesture it cannot decode, and its macOS shortcut would reach a
+        // PC it relays to as other keys: it gets nothing.
+        let mut old = fwd(Edge::Right);
+        old.peer_speaks("b", GESTURE_PROTO_VERSION - 1);
+        let mut relinked = fwd(Edge::Right);
+        relinked.peer_speaks("b", GESTURE_PROTO_VERSION);
+        relinked.link_down("b");
+        relinked.link_up("b");
+        for (what, mut f) in [("older protocol", old), ("never told", fwd(Edge::Right)), ("relinked, not told again", relinked)] {
+            go_out(&mut f);
+            let n = f.out().0.len();
+            assert_eq!(f.on_captured(CapturedEvent::Gesture(Gesture::SpaceRight), 300), Disposition::Swallow, "{what}");
+            assert_eq!(f.out().0.len(), n, "{what}");
+        }
+    }
+
+    #[test]
+    fn a_pc_gets_the_windows_shortcut_whatever_it_speaks() {
+        const D: u16 = 0x07;
+        // Swiping down is the one gesture the habits differ on; linked, the habit is the key mapping's.
+        for (map, gestures, down) in [
+            (KeyMap::Position, GestureMap::Linked, D),
+            (KeyMap::Mac, GestureMap::Linked, TAB),
+            (KeyMap::Position, GestureMap::Mac, TAB),
+            (KeyMap::Mac, GestureMap::Windows, D),
+        ] {
+            let mut config = cfg(Edge::Right);
+            config.peers[0].keys = map;
+            config.peers[0].gestures = gestures;
+            let mut f = Forwarder::new(config, screen(), Rec::default(), Mail::default());
+            f.link_up("b");
+            f.peer_speaks("b", GESTURE_PROTO_VERSION);
+            let seq = go_out(&mut f);
+            let n = f.out().0.len();
+            f.on_captured(CapturedEvent::Gesture(Gesture::Zoom(2)), 300);
+            f.on_captured(CapturedEvent::Gesture(Gesture::Overview), 300);
+            f.on_captured(CapturedEvent::Gesture(Gesture::AppWindows), 300);
+            let mut want = vec![
+                Msg::Key { seq, hid: CTRL, down: true, repeat: false },
+                Msg::Wheel { seq, dx: 0, dy: 2 },
+                Msg::Key { seq, hid: CTRL, down: false, repeat: false },
+            ];
+            want.extend(chord_msgs(seq, &[GUI, TAB]));
+            want.extend(chord_msgs(seq, &[ESC]));
+            assert_eq!(&msgs(&f)[n..], want, "{map:?} {gestures:?}");
+
+            // A click in Task View picked a window: the next swipe down opens something rather than closing.
+            f.on_captured(CapturedEvent::Gesture(Gesture::Overview), 300);
+            f.on_captured(CapturedEvent::Button { button: LEFT, down: true }, 300);
+            let n = f.out().0.len();
+            f.on_captured(CapturedEvent::Gesture(Gesture::AppWindows), 300);
+            assert_eq!(&msgs(&f)[n..], chord_msgs(seq, &[GUI, down]), "{map:?} {gestures:?}");
+        }
+    }
+
+    #[test]
+    fn a_gesture_with_a_modifier_held_does_nothing_anywhere() {
+        // Controlling: ⌘ held while pinching. The shortcut's own ⌘ up would release the user's hold there.
+        let mut config = cfg(Edge::Right);
+        config.peers[0].keys = KeyMap::Position;
+        let mut out = Forwarder::new(config, screen(), Rec::default(), Mail::default());
+        out.link_up("b");
+        let seq = go_out(&mut out);
+        key(&mut out, GUI, true);
+        let n = out.out().0.len();
+        assert_eq!(out.on_captured(CapturedEvent::Gesture(Gesture::Zoom(1)), 300), Disposition::Swallow);
+        assert_eq!(out.out().0.len(), n, "nothing sent while ⌘ is held");
+        key(&mut out, GUI, false);
+        let n = out.out().0.len();
+        out.on_captured(CapturedEvent::Gesture(Gesture::SmartZoom), 300);
+        assert_eq!(&msgs(&out)[n..], chord_msgs(seq, &[CTRL, 0x27]), "and sent again once it is up");
+
+        // Driven: the controller's ⌘ is held here.
+        let mut driven = fwd(Edge::Left);
+        go_in(&mut driven, 7, vec![GUI]);
+        let n = driven.sink().0.len();
+        driven.on_msg("b", Msg::Gesture { seq: 7, gesture: Gesture::Zoom(1) }, 10);
+        assert_eq!(driven.sink().0.len(), n);
+        assert!(driven.inj_keys.contains(&GUI), "the hold is intact");
+
+        // Relaying, with the controller holding ⌃.
+        let mut relay = relay_fwd(KeyMap::Position);
+        relay.peer_speaks("c", GESTURE_PROTO_VERSION);
+        start_relay(&mut relay, vec![CTRL]);
+        let n = relay.out().0.len();
+        relay.on_msg("b", Msg::Gesture { seq: 7, gesture: Gesture::SpaceLeft }, 1300);
+        assert_eq!(relay.out().0.len(), n);
+    }
+
+    #[test]
+    fn a_gesture_at_home_stays_home() {
+        let mut f = fwd(Edge::Right);
+        f.peer_speaks("b", GESTURE_PROTO_VERSION);
+        assert_eq!(f.on_captured(CapturedEvent::Gesture(Gesture::SpaceLeft), 0), Disposition::Pass);
+        assert!(f.out().0.is_empty());
+        assert!(f.sink().0.is_empty());
+    }
+
+    #[test]
+    fn a_driven_machine_plays_a_gesture_as_its_shortcut() {
+        let mut f = fwd(Edge::Left);
+        go_in(&mut f, 7, vec![]);
+        let n = f.sink().0.len();
+        f.on_msg("b", Msg::Gesture { seq: 7, gesture: Gesture::Overview }, 10);
+        f.on_msg("b", Msg::Gesture { seq: 6, gesture: Gesture::Overview }, 10);
+        f.on_msg("b", Msg::Gesture { seq: 7, gesture: Gesture::AppWindows }, 10);
+        let mut expect = GestureKeys::new();
+        let want: Vec<Fx> = [Gesture::Overview, Gesture::AppWindows]
+            .into_iter()
+            .flat_map(|g| expect.strokes(g, Platform::here()))
+            .map(|s| match s {
+                Stroke::Key(k, d) => Fx::Key(k, d),
+                Stroke::Wheel(n) => Fx::Wheel(0, n),
+            })
+            .collect();
+        assert_eq!(&f.sink().0[n..], want, "the stale session's gesture is dropped");
+        assert!(want.ends_with(&[Fx::Key(ESC, true), Fx::Key(ESC, false)]), "the second one closed the first");
+        assert!(f.inj_keys.is_empty(), "nothing left held");
+        assert!(f.out().0.iter().all(|(_, m)| !matches!(m, Msg::Gesture { .. })));
+    }
+
+    #[test]
+    fn a_relay_hands_a_gesture_on_as_the_next_machine_takes_it() {
+        let mut pc = relay_fwd(KeyMap::Position);
+        pc.peer_speaks("c", GESTURE_PROTO_VERSION);
+        let seq = start_relay(&mut pc, vec![]);
+        let (n, fx) = (pc.out().0.len(), pc.sink().0.len());
+        pc.on_msg("b", Msg::Gesture { seq: 7, gesture: Gesture::SpaceLeft }, 1300);
+        pc.on_msg("b", Msg::Gesture { seq: 6, gesture: Gesture::SpaceLeft }, 1300);
+        assert_eq!(&pc.out().0[n..], chord_msgs(seq, &[CTRL, GUI, LEFT_ARROW]).into_iter().map(|m| ("c".to_string(), m)).collect::<Vec<_>>());
+        assert_eq!(pc.sink().0.len(), fx, "nothing plays on the relay itself");
+        // The relay's own setting for the PC decides the habit: keys by position, linked, take Windows'.
+        let n = pc.out().0.len();
+        pc.on_msg("b", Msg::Gesture { seq: 7, gesture: Gesture::AppWindows }, 1300);
+        assert_eq!(&pc.out().0[n..], chord_msgs(seq, &[GUI, 0x07]).into_iter().map(|m| ("c".to_string(), m)).collect::<Vec<_>>());
+
+        let mut mac = relay_fwd(KeyMap::None);
+        mac.peer_speaks("c", GESTURE_PROTO_VERSION);
+        let seq = start_relay(&mut mac, vec![]);
+        let n = mac.out().0.len();
+        mac.on_msg("b", Msg::Gesture { seq: 7, gesture: Gesture::SpaceLeft }, 1300);
+        assert_eq!(&mac.out().0[n..], &[("c".to_string(), Msg::Gesture { seq, gesture: Gesture::SpaceLeft })]);
     }
 }

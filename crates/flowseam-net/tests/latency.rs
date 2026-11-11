@@ -40,19 +40,19 @@ fn input_on_an_idle_link_arrives_without_waiting_for_the_read_timeout() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
 
-    let (s_out_tx, s_out_rx) = channel::<Msg>();
+    let (s_out_tx, s_out_rx) = crossbeam_channel::unbounded::<Msg>();
     let (s_in_tx, s_in_rx) = channel::<Msg>();
-    let (c_out_tx, c_out_rx) = channel::<Msg>();
+    let (c_out_tx, c_out_rx) = crossbeam_channel::unbounded::<Msg>();
     let (c_in_tx, _c_in_rx) = channel::<Msg>();
 
     let (sid, spins) = (server_id.clone(), server_pins);
     let server = thread::spawn(move || {
-        let ep = Endpoint { identity: &sid, pins: &spins, me: &sinfo, timing: timing(), speak_for: None, paths_for: None };
+        let ep = Endpoint { identity: &sid, pins: &spins, me: &sinfo, timing: timing(), speak_for: None, paths_for: None, monitors: &[] };
         link::serve_once(&listener, &ep, &s_out_rx, &s_in_tx)
     });
     let (cid, cpins) = (client_id.clone(), client_pins);
     let client = thread::spawn(move || {
-        let ep = Endpoint { identity: &cid, pins: &cpins, me: &cinfo, timing: timing(), speak_for: None, paths_for: None };
+        let ep = Endpoint { identity: &cid, pins: &cpins, me: &cinfo, timing: timing(), speak_for: None, paths_for: None, monitors: &[] };
         link::run_client_once(addr, &ep, &c_out_rx, &c_in_tx)
     });
 

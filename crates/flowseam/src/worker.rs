@@ -196,6 +196,15 @@ impl WorkerHandle {
         }
     }
 
+    /// One command line to the worker (`switch <peer>`). Fails once a stop has closed its stdin.
+    pub fn send_line(&mut self, line: &str) -> std::io::Result<()> {
+        use std::io::Write;
+        let stdin = self.stdin.as_mut().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "the worker is stopping"))?;
+        stdin.write_all(line.as_bytes())?;
+        stdin.write_all(b"\n")?;
+        stdin.flush()
+    }
+
     /// Graceful first (close stdin); the GUI tick then calls `escalate` for SIGTERM, then SIGKILL. A forced kill carries no CLEAN,
     /// so it is reported as died — which is true, and makes the supervisor restore the cursor.
     pub fn stop(&mut self) {

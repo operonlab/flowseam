@@ -11,7 +11,27 @@
 # rustup/ and cargo/), and the signing identity in the keychain (FLOWSEAM_SIGN_IDENTITY).
 set -u
 
-VER=${1:?usage: scripts/make-app.sh <version>}
+write_login_plist() {
+  mkdir -p "$APP/Contents/Library/LaunchAgents" || fail "could not create LaunchAgents directory"
+  local plist="$APP/Contents/Library/LaunchAgents/$BUNDLE_ID.login.plist"
+  cat > "$plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$BUNDLE_ID.login</string>
+  <key>BundleProgram</key><string>Contents/MacOS/flowseam</string>
+  <key>ProgramArguments</key><array><string>flowseam</string><string>launch-at-login</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>LimitLoadToSessionType</key><string>Aqua</string>
+  <key>ProcessType</key><string>Interactive</string>
+  <key>AssociatedBundleIdentifiers</key><array><string>$BUNDLE_ID</string></array>
+</dict>
+</plist>
+EOF
+  plutil -lint "$plist" || fail "invalid login agent plist"
+}
+
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 TOOLS=${FLOWSEAM_TOOLCHAIN:-$HOME/.local/share/flowseam-release}
 IDENTITY=${FLOWSEAM_SIGN_IDENTITY:-Flowseam Release}
@@ -21,6 +41,13 @@ DIST=$ROOT/dist
 APP=$DIST/Flowseam.app
 
 fail() { echo "make-app: $*" >&2; exit 1; }
+
+if [ "${1:-}" = "--write-login-plist-for-test" ]; then
+  APP=${2:?usage: scripts/make-app.sh --write-login-plist-for-test <app path>}
+  write_login_plist
+  exit 0
+fi
+VER=${1:?usage: scripts/make-app.sh <version>}
 
 CARGO=$TOOLS/cargo/bin/cargo
 [ -x "$CARGO" ] || fail "no toolchain at $TOOLS (rustup with aarch64- and x86_64-apple-darwin)"
@@ -63,6 +90,7 @@ cat > "$APP/Contents/Info.plist" <<EOF
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$VER</string>
   <key>CFBundleVersion</key><string>$VER</string>
+  <key>LSUIElement</key><true/>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
   <key>NSHighResolutionCapable</key><true/>
@@ -70,6 +98,7 @@ cat > "$APP/Contents/Info.plist" <<EOF
 </plist>
 EOF
 
+write_login_plist
 codesign --force --sign "$IDENTITY" --identifier "$BUNDLE_ID" "$APP" || fail "signing with \"$IDENTITY\" failed"
 codesign --verify --strict "$APP" || fail "the signature does not verify"
 # The designated requirement must pin the certificate; a cdhash-only requirement would not carry grants over.

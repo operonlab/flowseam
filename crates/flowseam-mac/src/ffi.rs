@@ -21,6 +21,19 @@ pub struct CFRunLoopTimerContext {
     pub release: Option<extern "C" fn(*const c_void)>,
     pub copy_description: Option<extern "C" fn(*const c_void) -> *const c_void>,
 }
+#[repr(C)]
+pub struct CFRunLoopSourceContext {
+    pub version: isize,
+    pub info: *mut c_void,
+    pub retain: Option<extern "C" fn(*const c_void) -> *const c_void>,
+    pub release: Option<extern "C" fn(*const c_void)>,
+    pub copy_description: Option<extern "C" fn(*const c_void) -> CFTypeRef>,
+    pub equal: Option<extern "C" fn(*const c_void, *const c_void) -> bool>,
+    pub hash: Option<extern "C" fn(*const c_void) -> usize>,
+    pub schedule: Option<extern "C" fn(*mut c_void, *mut c_void, CFTypeRef)>,
+    pub cancel: Option<extern "C" fn(*mut c_void, *mut c_void, CFTypeRef)>,
+    pub perform: Option<extern "C" fn(*mut c_void)>,
+}
 pub type CGEventTapCallBack = extern "C" fn(*mut c_void, u32, CGEventRef, *mut c_void) -> CGEventRef;
 pub type CGDisplayReconfigurationCallBack = extern "C" fn(CGDirectDisplayID, u32, *mut c_void);
 
@@ -62,6 +75,15 @@ pub const EV_SCROLL_WHEEL: u32 = 22;
 pub const EV_OTHER_DOWN: u32 = 25;
 pub const EV_OTHER_UP: u32 = 26;
 pub const EV_OTHER_DRAGGED: u32 = 27;
+// Trackpad gesture events: NSEventType values, outside CGEventType. 29 carries pinches and smart zoom,
+// 30 (dock control) the system's three- and four-finger swipes and pinches.
+pub const EV_ROTATE: u32 = 18;
+pub const EV_BEGIN_GESTURE: u32 = 19;
+pub const EV_END_GESTURE: u32 = 20;
+pub const EV_GESTURE: u32 = 29;
+pub const EV_DOCK_CONTROL: u32 = 30;
+pub const EV_SWIPE: u32 = 31;
+pub const EV_SMART_MAGNIFY: u32 = 32;
 /// Delivered to the tap callback out of band, never masked.
 pub const EV_TAP_DISABLED_TIMEOUT: u32 = 0xFFFF_FFFE;
 pub const EV_TAP_DISABLED_USER_INPUT: u32 = 0xFFFF_FFFF;
@@ -75,6 +97,24 @@ pub const F_KEYBOARD_KEYCODE: u32 = 9;
 pub const F_KEYBOARD_TYPE: u32 = 10;
 pub const F_SCROLL_DELTA_AXIS1: u32 = 11;
 pub const F_SCROLL_DELTA_AXIS2: u32 = 12;
+// Private gesture fields, in no SDK header. Meanings as two open-source tools read them on macOS 26 and 27:
+// iss (github.com/joshuarli/iss, 0BSD) and TwinDesk (github.com/InukaAsith/TwinDesk).
+/// IOHIDEventType of the gesture: 8 zoom, 22 zoom toggle, 23 dock swipe.
+// A system-defined event's subtype and data1 (media keys). CoreGraphics names neither field; both were read
+// off events NSEvent built, on macOS 27.0.1 (arm64) and 26.7.1 (x86_64), and a test checks them against NSEvent.
+pub const F_SYSTEM_SUBTYPE: u32 = 99;
+pub const F_SYSTEM_DATA1: u32 = 149;
+pub const F_GESTURE_HID_TYPE: u32 = 110;
+/// Zoom: this event's magnification, positive zooming in.
+pub const F_GESTURE_ZOOM: u32 = 113;
+/// Dock swipe: 1 horizontal, 2 vertical, 3 or 4 pinch.
+pub const F_GESTURE_SWIPE_MOTION: u32 = 123;
+/// Dock swipe: how far it has gone.
+pub const F_GESTURE_SWIPE_PROGRESS: u32 = 124;
+/// Dock swipe: speed on the ending event.
+pub const F_GESTURE_SWIPE_VELOCITY_X: u32 = 129;
+/// IOHIDEventPhaseBits: 1 began, 2 changed, 4 ended, 8 cancelled.
+pub const F_GESTURE_PHASE: u32 = 132;
 
 // Tap placement and options.
 pub const TAP_LOCATION_HID: u32 = 0;
@@ -109,6 +149,7 @@ extern "C" {
     pub fn CGEventGetFlags(event: CGEventRef) -> u64;
     pub fn CGEventSetFlags(event: CGEventRef, flags: u64);
     pub fn CGEventGetIntegerValueField(event: CGEventRef, field: u32) -> i64;
+    pub fn CGEventGetDoubleValueField(event: CGEventRef, field: u32) -> f64;
     pub fn CGEventSetIntegerValueField(event: CGEventRef, field: u32, value: i64);
     pub fn CGEventCreateMouseEvent(source: CGEventSourceRef, ty: u32, pos: CGPoint, button: u32) -> CGEventRef;
     pub fn CGEventCreateKeyboardEvent(source: CGEventSourceRef, keycode: u16, down: bool) -> CGEventRef;
@@ -136,6 +177,7 @@ extern "C" {
 #[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
     pub fn CFRelease(cf: CFTypeRef);
+    pub fn CFRetain(cf: CFTypeRef) -> CFTypeRef;
     pub fn CFArrayGetCount(array: CFTypeRef) -> isize;
     pub fn CFArrayGetValueAtIndex(array: CFTypeRef, index: isize) -> CFTypeRef;
     pub fn CFDictionaryGetValue(dict: CFTypeRef, key: CFTypeRef) -> CFTypeRef;
@@ -144,9 +186,14 @@ extern "C" {
     pub fn CFMachPortInvalidate(port: CFMachPortRef);
     pub fn CFRunLoopGetCurrent() -> *mut c_void;
     pub fn CFRunLoopAddSource(rl: *mut c_void, source: CFRunLoopSourceRef, mode: CFTypeRef);
+    pub fn CFRunLoopRemoveSource(rl: *mut c_void, source: CFRunLoopSourceRef, mode: CFTypeRef);
+    pub fn CFRunLoopSourceCreate(allocator: *const c_void, order: isize, context: *mut CFRunLoopSourceContext) -> CFRunLoopSourceRef;
+    pub fn CFRunLoopSourceSignal(source: CFRunLoopSourceRef);
     pub fn CFRunLoopTimerCreate(allocator: *const c_void, fire_date: f64, interval: f64, flags: usize, order: isize, callout: extern "C" fn(*mut c_void, *mut c_void), context: *mut CFRunLoopTimerContext) -> *mut c_void;
     pub fn CFRunLoopAddTimer(rl: *mut c_void, timer: *mut c_void, mode: CFTypeRef);
     pub fn CFRunLoopTimerInvalidate(timer: *mut c_void);
+    pub fn CFRunLoopTimerSetNextFireDate(timer: *mut c_void, fire_date: f64);
+    pub fn CFRunLoopWakeUp(rl: *mut c_void);
     pub fn CFAbsoluteTimeGetCurrent() -> f64;
     #[cfg(test)]
     pub fn CFRunLoopAddCommonMode(rl: *mut c_void, mode: CFTypeRef);
@@ -196,8 +243,8 @@ extern "C" {
     pub fn signal(sig: i32, handler: usize) -> usize;
 }
 
-// Objective-C runtime, for the one thing CoreGraphics does not expose: the subtype and data1 of a
-// system-defined event (media keys). NSEvent lives in AppKit.
+// Objective-C runtime and AppKit, for what CoreGraphics does not cover: the pasteboard, and posting a
+// system-defined event (media keys), which only NSEvent builds.
 #[link(name = "AppKit", kind = "framework")]
 extern "C" {}
 #[link(name = "objc")]

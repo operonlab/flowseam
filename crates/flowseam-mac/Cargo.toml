@@ -1,6 +1,6 @@
 [package]
 name = "flowseam-mac"
-version = "0.1.3"
+version = "0.1.4"
 license = "MIT"
 edition = "2021"
 
@@ -9,6 +9,7 @@ flowseam-core = { path = "../flowseam-core" }
 flowseam-net = { path = "../flowseam-net" }
 # Already in the tree through getrandom; used for statvfs, whose struct differs per macOS arch.
 libc = "0.2"
+crossbeam-channel = "0.5"
 
 # objc2 refuses to compile for other targets, and the crate's pure-logic modules must build everywhere.
 [target.'cfg(target_os = "macos")'.dependencies]

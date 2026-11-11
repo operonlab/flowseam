@@ -14,6 +14,8 @@
 //! the app that gets the front after such an exit ever matters.
 
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(target_os = "macos")]
+use std::sync::OnceLock;
 
 /// Applies (10 ms each) without the front, while it is wanted, before asking for it again: activation
 /// normally completes well inside this, so a longer wait means another app took the front.
@@ -22,6 +24,53 @@ const RETAKE_AFTER: u32 = 20;
 const SETTLE: u32 = 50;
 
 static WANT_HIDDEN: AtomicBool = AtomicBool::new(false);
+static MAIN_IDLE: AtomicBool = AtomicBool::new(false);
+static WOKEN: AtomicBool = AtomicBool::new(false);
+static BEAT_SLOW: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "macos")]
+static POKER: OnceLock<crate::heartbeat::Poker> = OnceLock::new();
+
+#[cfg(target_os = "macos")]
+pub fn set_poker(p: crate::heartbeat::Poker) {
+    let _ = POKER.set(p);
+}
+
+/// Main thread, before deciding the turn's cadence: from here a change on another thread wakes the
+/// coming idle wait, so a change made while the cadence is being decided is not slept through.
+pub fn arm_idle() {
+    MAIN_IDLE.store(true, Ordering::SeqCst);
+}
+
+/// The heartbeat's next fire is the slow one. While AppKit runs its own tracking loop the main loop does
+/// not turn and only the heartbeat ticks, so a wake must also bring the heartbeat forward.
+pub fn beat_slow(slow: bool) {
+    BEAT_SLOW.store(slow, Ordering::SeqCst);
+}
+
+/// Any thread. Wakes the main loop's idle wait and a slow heartbeat; each at most once until the main
+/// thread sleeps again, however many mouse moves arrive.
+pub fn wake_if_idle() {
+    wake_if_idle_with(
+        || {
+            #[cfg(target_os = "macos")]
+            sys_front::post_empty_event();
+        },
+        || {
+            #[cfg(target_os = "macos")]
+            if let Some(p) = POKER.get() { p.poke(); }
+        },
+    );
+}
+
+fn wake_if_idle_with(post: impl FnOnce(), poke: impl FnOnce()) {
+    if BEAT_SLOW.swap(false, Ordering::SeqCst) {
+        poke();
+    }
+    if MAIN_IDLE.swap(false, Ordering::SeqCst) {
+        WOKEN.store(true, Ordering::SeqCst);
+        post();
+    }
+}
 
 /// AppKit work queued from other threads (the native drop), each with the time it may run from.
 #[cfg(target_os = "macos")]
@@ -33,6 +82,7 @@ static MAIN_TASKS: std::sync::Mutex<Vec<MainTask>> = std::sync::Mutex::new(Vec::
 #[cfg(target_os = "macos")]
 pub fn on_main(at: std::time::Instant, task: Box<dyn FnOnce() + Send>) {
     MAIN_TASKS.lock().unwrap_or_else(|e| e.into_inner()).push((at, task));
+    wake_if_idle();
 }
 
 /// Main thread: the queued tasks that are due, in the order they were queued.
@@ -52,7 +102,19 @@ fn run_due_tasks() {
 
 /// Ask for the cursor hidden (`true`) or shown. Any thread; applied by the next [`pump`].
 pub fn request(hidden: bool) {
-    WANT_HIDDEN.store(hidden, Ordering::SeqCst);
+    if WANT_HIDDEN.swap(hidden, Ordering::SeqCst) != hidden { wake_if_idle(); }
+}
+
+/// Pending AppKit transitions and queued work need the short cadence.
+pub fn busy() -> bool {
+    if WANT_HIDDEN.load(Ordering::SeqCst) { return true; }
+    #[cfg(target_os = "macos")]
+    {
+        if !MAIN_TASKS.lock().unwrap_or_else(|e| e.into_inner()).is_empty() { return true; }
+        sys_front::busy()
+    }
+    #[cfg(not(target_os = "macos"))]
+    { false }
 }
 
 /// The AppKit side, behind a trait so the transitions are tested without a window server.
@@ -140,11 +202,11 @@ pub use sys_front::{pump, start};
 
 #[cfg(target_os = "macos")]
 mod sys_front {
-    use super::{Front, FrontOs, WANT_HIDDEN};
+    use super::{Front, FrontOs, MAIN_IDLE, WANT_HIDDEN, WOKEN};
     use crate::ffi;
     use std::cell::RefCell;
     use std::ffi::{c_void, CStr};
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicPtr, Ordering};
     use std::time::{Duration, Instant};
 
     type Id = *mut c_void;
@@ -157,6 +219,30 @@ mod sys_front {
         y: f64,
         w: f64,
         h: f64,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct NsPoint { x: f64, y: f64 }
+
+    static APP: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+
+    /// AppKit's application-defined event releases a blocked nextEvent call from any thread.
+    pub(super) fn post_empty_event() {
+        let app = APP.load(Ordering::SeqCst);
+        if app.is_null() { return; }
+        // SAFETY: APP is process-lived; the event is autoreleased in this thread's pool.
+        unsafe {
+            let pool = ffi::objc_autoreleasePoolPush();
+            // type, location, flags, timestamp, windowNumber, context, subtype (short), data1, data2.
+            let make = std::mem::transmute::<Untyped, unsafe extern "C" fn(Id, Id, usize, NsPoint, usize, f64, isize, Id, i16, isize, isize) -> Id>(ffi::objc_msgSend as Untyped);
+            let event = make(class(c"NSEvent"), ffi::sel_registerName(c"otherEventWithType:location:modifierFlags:timestamp:windowNumber:context:subtype:data1:data2:".as_ptr()), 15, NsPoint { x: 0.0, y: 0.0 }, 0, 0.0, 0, std::ptr::null_mut(), 0, 0, 0);
+            if !event.is_null() {
+                let post = std::mem::transmute::<Untyped, unsafe extern "C" fn(Id, Id, Id, i8)>(ffi::objc_msgSend as Untyped);
+                post(app, ffi::sel_registerName(c"postEvent:atStart:".as_ptr()), event, 1);
+            }
+            ffi::objc_autoreleasePoolPop(pool);
+        }
     }
 
     // SAFETY (all sends): each cast below matches the Objective-C signature of the selector it is used
@@ -225,6 +311,7 @@ mod sys_front {
                 if app.is_null() {
                     return None;
                 }
+                APP.store(app, Ordering::SeqCst);
                 send_int(app, c"setActivationPolicy:", 1); // NSApplicationActivationPolicyAccessory
                 send0(app, c"finishLaunching");
                 let init = std::mem::transmute::<Untyped, unsafe extern "C" fn(Id, Id, NsRect, usize, usize, i8) -> Id>(
@@ -342,15 +429,22 @@ mod sys_front {
         });
     }
 
+    pub(super) fn busy() -> bool {
+        STATE.with(|s| s.borrow().as_ref().is_some_and(|(f, _)| f.taken || f.settle > 0))
+    }
+
     /// Apply the requested cursor state and hand AppKit its events for `total` (at least once), in
-    /// slices short enough that a request waits at most ~10 ms. Main thread only. If AppKit cannot be
-    /// set up this logs once and just sleeps, leaving the background hide as the only attempt.
-    pub fn pump(total: Duration) {
+    /// slices short enough that a request waits at most ~10 ms. With `idle` (after [`super::arm_idle`]) it
+    /// waits in one slice instead and returns early on [`super::wake_if_idle`]. Main thread only. If AppKit
+    /// cannot be set up this logs once and just sleeps, leaving the background hide as the only attempt.
+    pub fn pump(total: Duration, idle: bool) {
         let end = Instant::now() + total;
         let me = std::process::id() as i32;
         STATE.with(|s| {
             let mut s = s.borrow_mut();
             let (front, os) = s.get_or_insert_with(new_state);
+            // Idle keeps the flag as armed: a wake that already cleared it has posted its event.
+            if !idle { MAIN_IDLE.store(false, Ordering::SeqCst); }
             loop {
                 // SAFETY: balanced push/pop on this thread.
                 let pool = unsafe { ffi::objc_autoreleasePoolPush() };
@@ -359,15 +453,16 @@ mod sys_front {
                 match os {
                     Some(os) => {
                         front.apply(WANT_HIDDEN.load(Ordering::SeqCst), me, os);
-                        os.drain(left.min(SLICE));
+                        os.drain(if idle { left } else { left.min(SLICE) });
                     }
                     None => std::thread::sleep(left.min(SLICE)),
                 }
                 unsafe { ffi::objc_autoreleasePoolPop(pool) };
-                if Instant::now() >= end {
+                if WOKEN.swap(false, Ordering::SeqCst) || Instant::now() >= end {
                     break;
                 }
             }
+            MAIN_IDLE.store(false, Ordering::SeqCst);
         });
     }
 }
@@ -375,6 +470,32 @@ mod sys_front {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn waking_posts_once_per_idle_period_and_pokes_once_per_slow_beat() {
+        let posts = std::sync::atomic::AtomicUsize::new(0);
+        let pokes = std::sync::atomic::AtomicUsize::new(0);
+        let wake = || wake_if_idle_with(|| { posts.fetch_add(1, Ordering::SeqCst); }, || { pokes.fetch_add(1, Ordering::SeqCst); });
+        let seen = || (posts.load(Ordering::SeqCst), pokes.load(Ordering::SeqCst));
+        MAIN_IDLE.store(false, Ordering::SeqCst);
+        beat_slow(false);
+        wake();
+        assert_eq!(seen(), (0, 0), "main loop turning fast, heartbeat fast");
+        arm_idle();
+        wake();
+        wake();
+        assert_eq!(seen(), (1, 0), "one post per idle wait");
+        assert!(WOKEN.swap(false, Ordering::SeqCst), "the idle wait is told to return");
+        beat_slow(true);
+        wake();
+        wake();
+        assert_eq!(seen(), (1, 1), "a tracking loop: only the slow heartbeat is brought forward, once");
+        arm_idle();
+        beat_slow(true);
+        wake();
+        assert_eq!(seen(), (2, 2));
+        WOKEN.store(false, Ordering::SeqCst);
+    }
 
     const ME: i32 = 100;
 
@@ -516,6 +637,8 @@ mod tests {
         ("NSApplication", "hide:", false),
         ("NSApplication", "nextEventMatchingMask:untilDate:inMode:dequeue:", false),
         ("NSApplication", "sendEvent:", false),
+        ("NSApplication", "postEvent:atStart:", false),
+        ("NSEvent", "otherEventWithType:location:modifierFlags:timestamp:windowNumber:context:subtype:data1:data2:", true),
         ("NSWindow", "alloc", true),
         ("NSWindow", "initWithContentRect:styleMask:backing:defer:", false),
         ("NSWindow", "setOpaque:", false),

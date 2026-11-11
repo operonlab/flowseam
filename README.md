@@ -52,7 +52,8 @@ Files come back from it while a Mac drives it.
   machines. No telemetry. See [Privacy and network](#privacy-and-network).
 - **Stays out of the way.** A menu bar icon (Mac) or tray icon (Windows) shows whether sharing is on and
   which computers are connected. Closing the window keeps Flowseam running, and a background process that
-  dies or stalls is restarted.
+  dies or stalls is restarted. On a Mac the Dock and menu bar icons can each be turned off; opening Flowseam
+  again brings the window back.
 - **Four languages.** English, 繁體中文, 日本語 and 한국어, following the system language.
 
 ## The app
@@ -161,7 +162,9 @@ The full table is in [`crates/flowseam-core/src/mac_shortcuts.rs`](crates/flowse
 | Connection | Mutual TLS, pinned to the certificate of the computer you paired with |
 | Route | Direct, over your local network or an SSH tunnel you set up. No server in between |
 | Port | TCP 24800 |
-| Telemetry | None. Check for Updates opens the Releases page, or runs Homebrew when Homebrew installed the copy you run |
+| Telemetry | None |
+| Network | No connections beyond your own computers by default. With automatic update checks on (Advanced, off by default), one request a day to api.github.com for the latest release (hourly while it fails) |
+| Updates | Flowseam only tells you a new version exists, and a version can be skipped. Check for Updates opens the Releases page, or runs Homebrew when Homebrew installed the copy you run |
 
 ## Known limitations
 

@@ -9,6 +9,7 @@ pub mod cursor;
 pub mod emergency;
 pub mod framing;
 pub mod geometry;
+pub mod gesture;
 pub mod log;
 pub mod mac_shortcuts;
 pub mod modifiers;

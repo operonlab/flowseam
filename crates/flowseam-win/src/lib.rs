@@ -9,6 +9,7 @@ use flowseam_core::proto::Msg;
 use flowseam_net::clipboard::ClipboardSync;
 
 pub mod app;
+pub mod edid;
 pub mod inject;
 pub mod keymap;
 pub mod stdio;

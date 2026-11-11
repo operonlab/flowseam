@@ -20,6 +20,12 @@ pub fn show_update_check() { UPDATE_CHECK_REQUESTED.store(true, AtomicOrdering::
 struct Note { icon: Icon, tint: Color32, title: &'static str, body: &'static str }
 struct Release { version: &'static str, items: &'static [Note] }
 const NOTES: &[Release] = &[
+    Release { version: "0.1.4", items: &[
+        Note { icon: Icon::Display, tint: PURPLE, title: "螢幕跟著一起切換", body: "在 Apple 晶片的 Mac 上，可以加入同時接著另一台電腦的螢幕，並選好顯示那台的輸入來源。選單列的切換按鈕會先切勾選的螢幕，再切鍵盤滑鼠；有一台失敗就全部切回來。兩台都需要這一版。" },
+        Note { icon: Icon::Arrows, tint: BLUE, title: "觸控板手勢送到對方", body: "切換空間、指揮中心、App Exposé、顯示桌面與 App 啟動器，會變成被操作那台電腦自己的快捷鍵，不再同時作用在這台 Mac 上。" },
+        Note { icon: Icon::Sliders, tint: GREEN, title: "閒置時更安靜", body: "沒有動作時，Mac 上的背景程式幾乎不用 CPU。在一台同時連著兩台電腦的 Mac mini 上，從約 6.6% 降到 1% 以下。" },
+        Note { icon: Icon::Grid, tint: TEAL, title: "幾個修正", body: "操作別台時按 Caps Lock 不會再讓背景程式當掉；從選單列切換後，不會過一下又自己切回來；被操作的 Mac 上，⌃↑、⌃← ⌃→ 和 F11 這類快捷鍵可以用了。" },
+    ] },
     Release { version: "0.1.3", items: &[
         Note { icon: Icon::Arrows, tint: BLUE, title: "經過一台 Mac 控制下一台", body: "一台 Mac 操作另一台 Mac 時，把游標推到那台 Mac 通往下一台電腦的邊緣，就能接著操作下一台，例如經過 Mac mini 操作 Windows PC。只有中間那台 Mac 需要這一版。" },
         Note { icon: Icon::Sliders, tint: GREEN, title: "碰哪台就由哪台接手", body: "另一台電腦正在操作這台 Mac 時，動一下這台 Mac 的滑鼠或按一個鍵，就改由這台 Mac 操作。" },
@@ -45,7 +51,7 @@ const NOTES: &[Release] = &[
     Release { version: "0.1.0", items: &[Note { icon: Icon::Arrows, tint: BLUE, title: "第一版", body: "開始在電腦之間共用鍵盤與滑鼠。" }] },
 ];
 
-fn compare_versions(a: &str, b: &str) -> Ordering {
+pub(crate) fn compare_versions(a: &str, b: &str) -> Ordering {
     let left: Vec<u64> = a.split('.').filter_map(|x| x.parse().ok()).collect();
     let right: Vec<u64> = b.split('.').filter_map(|x| x.parse().ok()).collect();
     for i in 0..left.len().max(right.len()) {
@@ -105,18 +111,7 @@ fn updated_prefs(text: &str, current: &str) -> String {
 
 fn prefs_path() -> std::path::PathBuf { crate::config_dir().join("prefs.toml") }
 fn record_seen(path: &Path, current: &str) -> std::io::Result<()> {
-    let text = match fs::read_to_string(path) { Ok(text) => text, Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(), Err(e) => return Err(e) };
-    let new_text = updated_prefs(&text, current);
-    if new_text == text { return Ok(()); }
-    if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
-    #[cfg(windows)]
-    return fs::write(path, new_text);
-    #[cfg(not(windows))]
-    {
-    let tmp = path.with_extension("toml.about-tmp");
-    fs::write(&tmp, new_text)?;
-    fs::rename(&tmp, path)
-    }
+    crate::ui_prefs::write_shared(path, |text| updated_prefs(text, current))
 }
 
 fn open_url(url: &str) -> std::io::Result<()> {
@@ -160,7 +155,9 @@ fn upgrade_with_homebrew(prefix: &str) -> std::io::Result<()> {
 #[derive(Clone, Copy)]
 enum Sheet { WhatsNew, UpdateCheck }
 
-pub struct About { sheet: Option<Sheet>, releases: Vec<&'static Release>, pending: Vec<&'static Release>, error: Option<String> }
+/// `newer`: set each frame from the update check, unfiltered, so the sheet names even a skipped version; `skip`
+/// holds the version the user just chose to skip, for the window to store.
+pub struct About { sheet: Option<Sheet>, releases: Vec<&'static Release>, pending: Vec<&'static Release>, error: Option<String>, pub newer: Option<String>, skip: Option<String> }
 impl About {
     pub fn new(used_before: bool) -> Self {
         let seen = fs::read_to_string(prefs_path()).ok().and_then(|text| seen_from(&text).map(str::to_owned));
@@ -171,8 +168,10 @@ impl About {
             Ok("update") => show_update_check(),
             _ => {}
         }
-        Self { sheet: None, releases: Vec::new(), pending, error: None }
+        Self { sheet: None, releases: Vec::new(), pending, error: None, newer: None, skip: None }
     }
+
+    pub fn take_skip(&mut self) -> Option<String> { self.skip.take() }
 
     pub fn draw(&mut self, ctx: &egui::Context) {
         if self.sheet.is_none() {
@@ -231,17 +230,19 @@ impl About {
 
     fn draw_update_check(&mut self, ctx: &egui::Context) {
         #[derive(PartialEq)]
-        enum Do { Releases, Brew, Copy, Done }
+        enum Do { Releases, Brew, Copy, Skip, Done }
         let subtitle = crate::i18n::trf("目前版本 {}", &[&version()]);
         #[cfg(target_os = "macos")]
         let brew = homebrew();
         #[cfg(not(target_os = "macos"))]
         let brew: Option<&str> = None;
         let error = self.error.clone();
+        let newer = self.newer.clone();
         let (action, closing) = sheet(ctx, "update-check", Icon::Download, GREEN, crate::i18n::tr("檢查更新"), &subtitle, |ui, th| {
             let mut act = None;
             ui.vertical_centered(|ui| {
-                ui.add(egui::Label::new(RichText::new(crate::i18n::tr("Flowseam 不會自行連網。請到版本頁查看是否有新版本。")).size(12.5).color(th.text2)).wrap());
+                ui.add(egui::Label::new(RichText::new(crate::i18n::tr("啟用自動檢查後，Flowseam 每天會向 GitHub 查詢新版；也可以開啟版本頁查看。")).size(12.5).color(th.text2)).wrap());
+                if let Some(v) = &newer { ui.add_space(8.0); ui.label(RichText::new(crate::i18n::trf("有新版 {}", &[v])).size(13.0).strong().color(th.text)); }
             });
             ui.add_space(16.0);
             if cfg!(target_os = "macos") && brew.is_none() {
@@ -259,6 +260,7 @@ impl About {
             if let Some(error) = &error { ui.label(RichText::new(crate::i18n::trf("無法完成操作：{}", &[error])).size(11.5).color(crate::gui::RED)); ui.add_space(8.0); }
             ui.horizontal(|ui| {
                 if brew.is_some() && secondary(ui, th, crate::i18n::tr("用 Homebrew 更新")).clicked() { act = Some(Do::Brew); }
+                if newer.is_some() && secondary(ui, th, crate::i18n::tr("略過這一版")).clicked() { act = Some(Do::Skip); }
                 ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
                     if primary(ui, th, crate::i18n::tr("打開版本頁")).clicked() { act = Some(Do::Releases); }
                     if secondary(ui, th, crate::i18n::tr("完成")).clicked() { act = Some(Do::Done); }
@@ -273,6 +275,7 @@ impl About {
             #[cfg(not(target_os = "macos"))]
             Some(Do::Brew) => {}
             Some(Do::Copy) => ctx.copy_text("brew install --cask operonlab/tap/flowseam".to_string()),
+            Some(Do::Skip) => { self.skip = self.newer.clone(); self.sheet = None; self.error = None; }
             Some(Do::Done) => { self.sheet = None; self.error = None; }
             None if closing => { self.sheet = None; self.error = None; }
             None => {}

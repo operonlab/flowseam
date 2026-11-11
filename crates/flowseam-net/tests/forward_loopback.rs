@@ -2,7 +2,8 @@
 //! its controller's input to its own peer, then resume injecting on return.
 
 use std::net::TcpListener;
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{channel, Receiver};
+use crossbeam_channel::Sender;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -83,7 +84,7 @@ impl Outbox for Routes {
 
 fn cfg(peer: &str, edge: Edge) -> FwdConfig {
     FwdConfig {
-        peers: vec![PeerSpec { name: peer.into(), edge, keys: flowseam_core::config::KeyMap::None }],
+        peers: vec![PeerSpec { name: peer.into(), edge, keys: flowseam_core::config::KeyMap::None, gestures: Default::default() }],
         policy: SwitchPolicy::default(),
         boundary_px: 2,
     }
@@ -112,19 +113,19 @@ fn a_switches_out_b_injects_then_b_returns_the_cursor() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
 
-    let (a_out_tx, a_out_rx) = channel::<Msg>();
+    let (a_out_tx, a_out_rx) = crossbeam_channel::unbounded::<Msg>();
     let (a_in_tx, a_in_rx) = channel::<Msg>();
-    let (b_out_tx, b_out_rx) = channel::<Msg>();
+    let (b_out_tx, b_out_rx) = crossbeam_channel::unbounded::<Msg>();
     let (b_in_tx, b_in_rx) = channel::<Msg>();
 
     let (id, pins, me) = (b_id.clone(), b_pins, b_info);
     let server = thread::spawn(move || {
-        let ep = Endpoint { identity: &id, pins: &pins, me: &me, timing: timing(), speak_for: None, paths_for: None };
+        let ep = Endpoint { identity: &id, pins: &pins, me: &me, timing: timing(), speak_for: None, paths_for: None, monitors: &[] };
         link::serve_once(&listener, &ep, &b_out_rx, &b_in_tx)
     });
     let (id, pins, me) = (a_id.clone(), a_pins, a_info);
     let client = thread::spawn(move || {
-        let ep = Endpoint { identity: &id, pins: &pins, me: &me, timing: timing(), speak_for: None, paths_for: None };
+        let ep = Endpoint { identity: &id, pins: &pins, me: &me, timing: timing(), speak_for: None, paths_for: None, monitors: &[] };
         link::run_client_once(addr, &ep, &a_out_rx, &a_in_tx)
     });
 
@@ -184,20 +185,20 @@ fn a_drives_b_through_c_then_c_returns_and_a_releases() {
     let ab_addr = ab_listener.local_addr().unwrap();
     let bc_addr = bc_listener.local_addr().unwrap();
 
-    let (a_out_tx, a_out_rx) = channel::<Msg>();
+    let (a_out_tx, a_out_rx) = crossbeam_channel::unbounded::<Msg>();
     let (a_in_tx, a_in_rx) = channel::<Msg>();
-    let (b_a_out_tx, b_a_out_rx) = channel::<Msg>();
+    let (b_a_out_tx, b_a_out_rx) = crossbeam_channel::unbounded::<Msg>();
     let (b_a_in_tx, b_a_in_rx) = channel::<Msg>();
-    let (b_c_out_tx, b_c_out_rx) = channel::<Msg>();
+    let (b_c_out_tx, b_c_out_rx) = crossbeam_channel::unbounded::<Msg>();
     let (b_c_in_tx, b_c_in_rx) = channel::<Msg>();
-    let (c_out_tx, c_out_rx) = channel::<Msg>();
+    let (c_out_tx, c_out_rx) = crossbeam_channel::unbounded::<Msg>();
     let (c_in_tx, c_in_rx) = channel::<Msg>();
 
     let ab_server = {
         let (id, me) = (b_id.clone(), b_info.clone());
         let pins = PinSet::new([fingerprint(&a_id.cert_der)]);
         thread::spawn(move || {
-            let ep = Endpoint { identity: &id, pins: &pins, me: &me, timing: timing(), speak_for: None, paths_for: None };
+            let ep = Endpoint { identity: &id, pins: &pins, me: &me, timing: timing(), speak_for: None, paths_for: None, monitors: &[] };
             link::serve_once(&ab_listener, &ep, &b_a_out_rx, &b_a_in_tx)
         })
     };
@@ -205,7 +206,7 @@ fn a_drives_b_through_c_then_c_returns_and_a_releases() {
         let (id, me) = (a_id.clone(), a_info);
         let pins = PinSet::new([fingerprint(&b_id.cert_der)]);
         thread::spawn(move || {
-            let ep = Endpoint { identity: &id, pins: &pins, me: &me, timing: timing(), speak_for: None, paths_for: None };
+            let ep = Endpoint { identity: &id, pins: &pins, me: &me, timing: timing(), speak_for: None, paths_for: None, monitors: &[] };
             link::run_client_once(ab_addr, &ep, &a_out_rx, &a_in_tx)
         })
     };
@@ -213,7 +214,7 @@ fn a_drives_b_through_c_then_c_returns_and_a_releases() {
         let (id, me) = (c_id.clone(), c_info);
         let pins = PinSet::new([fingerprint(&b_id.cert_der)]);
         thread::spawn(move || {
-            let ep = Endpoint { identity: &id, pins: &pins, me: &me, timing: timing(), speak_for: None, paths_for: None };
+            let ep = Endpoint { identity: &id, pins: &pins, me: &me, timing: timing(), speak_for: None, paths_for: None, monitors: &[] };
             link::serve_once(&bc_listener, &ep, &c_out_rx, &c_in_tx)
         })
     };
@@ -221,14 +222,14 @@ fn a_drives_b_through_c_then_c_returns_and_a_releases() {
         let (id, me) = (b_id.clone(), b_info);
         let pins = PinSet::new([fingerprint(&c_id.cert_der)]);
         thread::spawn(move || {
-            let ep = Endpoint { identity: &id, pins: &pins, me: &me, timing: timing(), speak_for: None, paths_for: None };
+            let ep = Endpoint { identity: &id, pins: &pins, me: &me, timing: timing(), speak_for: None, paths_for: None, monitors: &[] };
             link::run_client_once(bc_addr, &ep, &b_c_out_rx, &b_c_in_tx)
         })
     };
 
     let screen = vec![Rect { x: 0, y: 0, w: 1440, h: 900 }];
     let mut b_cfg = cfg("a", Edge::Left);
-    b_cfg.peers.push(PeerSpec { name: "c".into(), edge: Edge::Right, keys: flowseam_core::config::KeyMap::None });
+    b_cfg.peers.push(PeerSpec { name: "c".into(), edge: Edge::Right, keys: flowseam_core::config::KeyMap::None, gestures: Default::default() });
     let mut a = Forwarder::new(cfg("b", Edge::Right), screen.clone(), Rec::default(), Chan(a_out_tx));
     let mut b = Forwarder::new(b_cfg, screen.clone(), Rec::default(), Routes { a: b_a_out_tx, c: b_c_out_tx });
     let mut c = Forwarder::new(cfg("b", Edge::Left), screen, Rec::default(), Chan(c_out_tx));

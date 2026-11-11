@@ -2,10 +2,10 @@
 //!
 //! The tap callback must return in microseconds (design §4), so it only
 //! translates the event and forwards it to the sink. Thread lifetime is kept
-//! by polling a stop flag between short run-loop slices, which avoids the
-//! lost-wakeup race of `CFRunLoopStop` before the loop starts.
+//! by a signaled run-loop source, so stop before the next wait is retained.
 
 use crate::ffi::{self, CGEventRef};
+use crate::gesture::{Fields as GestureFields, GestureReader};
 use crate::grab::GrabGuard;
 use crate::inject_mark;
 use crate::keymap::{aux_key, by_position, keycode_to_hid, modifier_down, KC_CAPS_LOCK, KC_FN, KC_GRAVE, KC_ISO_SECTION};
@@ -38,7 +38,15 @@ const EVENT_MASK: u64 = mask(ffi::EV_KEY_DOWN)
     | mask(ffi::EV_RIGHT_DRAGGED)
     | mask(ffi::EV_OTHER_DRAGGED)
     | mask(ffi::EV_SCROLL_WHEEL)
-    | mask(ffi::EV_SYSTEM_DEFINED);
+    | mask(ffi::EV_SYSTEM_DEFINED)
+    // Every gesture type, so while the peer is driven none of them also acts on this Mac.
+    | mask(ffi::EV_ROTATE)
+    | mask(ffi::EV_BEGIN_GESTURE)
+    | mask(ffi::EV_END_GESTURE)
+    | mask(ffi::EV_GESTURE)
+    | mask(ffi::EV_DOCK_CONTROL)
+    | mask(ffi::EV_SWIPE)
+    | mask(ffi::EV_SMART_MAGNIFY);
 
 const fn mask(ty: u32) -> u64 {
     1u64 << ty
@@ -117,6 +125,18 @@ fn trace() -> bool {
     *TRACE.get_or_init(|| std::env::var_os("FLOWSEAM_TRACE_INPUT").is_some())
 }
 
+/// `FLOWSEAM_TRACE_GESTURES=1`, or a file `~/.config/flowseam/trace-gestures` when the worker starts, logs
+/// every gesture event's fields and what they read as. Unlike `FLOWSEAM_TRACE_INPUT` it logs no keys. The
+/// file is there because a launchd agent's environment cannot be changed from an ssh login.
+fn trace_gestures() -> bool {
+    static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *TRACE.get_or_init(|| {
+        std::env::var_os("FLOWSEAM_TRACE_GESTURES").is_some()
+            || std::env::var_os("HOME")
+                .is_some_and(|h| std::path::Path::new(&h).join(".config/flowseam/trace-gestures").exists())
+    })
+}
+
 /// While grabbed, replace each motion's delta with what the guard forwards (see
 /// `GrabGuard::grabbed_motion`).
 pub fn correct_motion(guard: &GrabGuard, events: &mut [CapturedEvent], loc: impl Fn() -> (f64, f64)) {
@@ -145,11 +165,40 @@ struct TapCtx {
     breaker: TimeoutBreaker,
     started: Instant,
     stop: Arc<AtomicBool>,
+    gestures: GestureReader,
 }
 
 pub struct TapHandle {
     thread: Option<JoinHandle<()>>,
     stop: Arc<AtomicBool>,
+    stop_source: usize,
+    run_loop: usize,
+}
+
+extern "C" fn stop_source_perform(_info: *mut c_void) {}
+
+fn new_stop_source() -> ffi::CFRunLoopSourceRef {
+    let mut context = ffi::CFRunLoopSourceContext {
+        version: 0,
+        info: ptr::null_mut(),
+        retain: None,
+        release: None,
+        copy_description: None,
+        equal: None,
+        hash: None,
+        schedule: None,
+        cancel: None,
+        perform: Some(stop_source_perform),
+    };
+    unsafe { ffi::CFRunLoopSourceCreate(ptr::null(), 0, &mut context) }
+}
+
+fn wake_stop_source(source: usize, run_loop: *mut c_void) {
+    // A source keeps its signal across the check-to-wait race.
+    unsafe {
+        ffi::CFRunLoopSourceSignal(source as ffi::CFRunLoopSourceRef);
+        ffi::CFRunLoopWakeUp(run_loop);
+    }
 }
 
 /// Install the tap on its own thread. Returns only after the tap exists, so a
@@ -165,7 +214,7 @@ pub fn start(sink: Box<dyn CaptureSink>, guard: GrabGuard, cfg: TapConfig) -> Re
         .spawn(move || run_tap(sink, guard, cfg, tx, thread_stop))
         .map_err(|_| BackendError::TapCreateFailed)?;
     match rx.recv() {
-        Ok(Ok(())) => Ok(TapHandle { thread: Some(handle), stop }),
+        Ok(Ok((source, run_loop))) => Ok(TapHandle { thread: Some(handle), stop, stop_source: source, run_loop }),
         Ok(Err(e)) => {
             let _ = handle.join();
             Err(e)
@@ -180,8 +229,15 @@ pub fn start(sink: Box<dyn CaptureSink>, guard: GrabGuard, cfg: TapConfig) -> Re
 impl TapHandle {
     pub fn stop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
+        if self.stop_source != 0 {
+            wake_stop_source(self.stop_source, self.run_loop as *mut c_void);
+        }
         if let Some(t) = self.thread.take() {
             let _ = t.join();
+        }
+        if self.stop_source != 0 {
+            unsafe { ffi::CFRelease(self.stop_source as ffi::CFTypeRef) };
+            self.stop_source = 0;
         }
     }
 }
@@ -190,7 +246,7 @@ fn run_tap(
     sink: Box<dyn CaptureSink>,
     guard: GrabGuard,
     _cfg: TapConfig,
-    ready: mpsc::Sender<Result<(), BackendError>>,
+    ready: mpsc::Sender<Result<(usize, usize), BackendError>>,
     stop: Arc<AtomicBool>,
 ) {
     let ctx = Box::into_raw(Box::new(TapCtx {
@@ -204,6 +260,7 @@ fn run_tap(
         breaker: TimeoutBreaker::default(),
         started: Instant::now(),
         stop: stop.clone(),
+        gestures: GestureReader::new(macos_major()),
     }));
     let port = unsafe {
         ffi::CGEventTapCreate(
@@ -222,15 +279,32 @@ fn run_tap(
     }
     unsafe {
         (*ctx).port = port;
+        let run_loop = ffi::CFRunLoopGetCurrent();
         let source = ffi::CFMachPortCreateRunLoopSource(ptr::null(), port, 0);
-        ffi::CFRunLoopAddSource(ffi::CFRunLoopGetCurrent(), source, ffi::kCFRunLoopCommonModes);
+        ffi::CFRunLoopAddSource(run_loop, source, ffi::kCFRunLoopCommonModes);
         ffi::CFRelease(source as ffi::CFTypeRef);
     }
-    let _ = ready.send(Ok(()));
+    let stop_source = new_stop_source();
+    if stop_source.is_null() {
+        let _ = ready.send(Err(BackendError::TapCreateFailed));
+        unsafe {
+            ffi::CGEventTapEnable(port, false);
+            ffi::CFMachPortInvalidate(port);
+            ffi::CFRelease(port as ffi::CFTypeRef);
+            drop(Box::from_raw(ctx));
+        }
+        return;
+    }
+    let run_loop = unsafe { ffi::CFRunLoopGetCurrent() };
+    unsafe { ffi::CFRunLoopAddSource(run_loop, stop_source, ffi::kCFRunLoopDefaultMode) };
+    if ready.send(Ok((stop_source as usize, run_loop as usize))).is_err() {
+        unsafe { ffi::CFRelease(stop_source as ffi::CFTypeRef) };
+    }
     while !stop.load(Ordering::SeqCst) {
-        unsafe { ffi::CFRunLoopRunInMode(ffi::kCFRunLoopDefaultMode, 0.1, false) };
+        unsafe { ffi::CFRunLoopRunInMode(ffi::kCFRunLoopDefaultMode, 10.0, true) };
     }
     unsafe {
+        ffi::CFRunLoopRemoveSource(run_loop, stop_source, ffi::kCFRunLoopDefaultMode);
         ffi::CGEventTapEnable(port, false);
         ffi::CFMachPortInvalidate(port);
         ffi::CFRelease(port as ffi::CFTypeRef);
@@ -265,7 +339,17 @@ extern "C" fn tap_callback(_proxy: *mut c_void, ty: u32, ev: CGEventRef, user: *
         return ev;
     }
     let outcome = catch_unwind(AssertUnwindSafe(|| {
-        let mut captured = unsafe { translate(ty, ev) };
+        let mut captured = if is_gesture(ty) {
+            // Read while the pointer is home too, so a swipe that started here ends as one gesture.
+            let fields = unsafe { gesture_fields(ty, ev) };
+            let read = ctx.gestures.feed(&fields);
+            if trace_gestures() {
+                eprintln!("flowseam trace: gesture event {fields:?} -> {read:?}");
+            }
+            read.map(CapturedEvent::Gesture).into_iter().collect()
+        } else {
+            unsafe { translate(ty, ev) }
+        };
         if ty == ffi::EV_SYSTEM_DEFINED && captured.is_empty() {
             // Brightness, mouse-button bookkeeping and the like: not forwarded, so they stay local.
             return false;
@@ -286,6 +370,47 @@ extern "C" fn tap_callback(_proxy: *mut c_void, ty: u32, ev: CGEventRef, user: *
             ev
         }
     }
+}
+
+fn is_gesture(ty: u32) -> bool {
+    matches!(
+        ty,
+        ffi::EV_ROTATE | ffi::EV_BEGIN_GESTURE | ffi::EV_END_GESTURE | ffi::EV_GESTURE | ffi::EV_DOCK_CONTROL
+            | ffi::EV_SWIPE | ffi::EV_SMART_MAGNIFY
+    )
+}
+
+unsafe fn gesture_fields(ty: u32, ev: CGEventRef) -> GestureFields {
+    let int = |f: u32| ffi::CGEventGetIntegerValueField(ev, f);
+    let dbl = |f: u32| ffi::CGEventGetDoubleValueField(ev, f);
+    GestureFields {
+        ty,
+        hid_type: int(ffi::F_GESTURE_HID_TYPE),
+        phase: int(ffi::F_GESTURE_PHASE),
+        motion: int(ffi::F_GESTURE_SWIPE_MOTION),
+        progress: dbl(ffi::F_GESTURE_SWIPE_PROGRESS),
+        velocity: dbl(ffi::F_GESTURE_SWIPE_VELOCITY_X),
+        zoom: dbl(ffi::F_GESTURE_ZOOM),
+    }
+}
+
+/// The running macOS major version, 0 when it cannot be read (then horizontal swipes read as before 26).
+fn macos_major() -> u32 {
+    let mut buf = [0u8; 32];
+    let mut len = buf.len();
+    let name = c"kern.osproductversion";
+    // SAFETY: buf and len describe a writable buffer; the name is NUL-terminated.
+    let r = unsafe { libc::sysctlbyname(name.as_ptr(), buf.as_mut_ptr().cast(), &mut len, ptr::null_mut(), 0) };
+    let major = if r == 0 { parse_major(&buf[..len]) } else { None };
+    major.unwrap_or_else(|| {
+        eprintln!("flowseam: macOS version unreadable; horizontal swipes may switch spaces the wrong way");
+        0
+    })
+}
+
+fn parse_major(version: &[u8]) -> Option<u32> {
+    let s = std::str::from_utf8(version).ok()?.trim_end_matches('\0');
+    s.split('.').next()?.parse().ok()
 }
 
 /// Map one CG event to zero or more flowseam_core captured events.
@@ -339,10 +464,13 @@ unsafe fn translate(ty: u32, ev: CGEventRef) -> Vec<CapturedEvent> {
                 dy: field(ffi::F_MOUSE_DELTA_Y) as i32,
             }]
         }
-        ffi::EV_SYSTEM_DEFINED => match unsafe { sys::system_defined(ev) }.and_then(|(st, d1)| aux_key(st, d1)) {
-            Some((hid, down)) => vec![CapturedEvent::Key { hid, down }],
-            None => vec![],
-        },
+        ffi::EV_SYSTEM_DEFINED => {
+            let (st, d1) = unsafe { sys::system_defined(ev) };
+            match aux_key(st, d1) {
+                Some((hid, down)) => vec![CapturedEvent::Key { hid, down }],
+                None => vec![],
+            }
+        }
         ffi::EV_SCROLL_WHEEL => vec![CapturedEvent::Wheel {
             dx: field(ffi::F_SCROLL_DELTA_AXIS2) as i32,
             dy: field(ffi::F_SCROLL_DELTA_AXIS1) as i32,
@@ -365,7 +493,7 @@ pub fn on_fault(guard: &GrabGuard, sink: &mut dyn CaptureSink, f: CaptureFault) 
 impl TapHandle {
     /// A handle with no real tap behind it. Lets tests reach the grab path without creating an OS tap.
     pub fn dummy() -> Self {
-        TapHandle { thread: Some(thread::spawn(|| {})), stop: Arc::new(AtomicBool::new(false)) }
+        TapHandle { thread: Some(thread::spawn(|| {})), stop: Arc::new(AtomicBool::new(false)), stop_source: 0, run_loop: 0 }
     }
 }
 
@@ -375,6 +503,46 @@ mod tests {
     use crate::grab::mock::{Log, MockOs};
     use flowseam_core::backend::{Permission, Preflight};
     use std::sync::Mutex;
+
+    #[test]
+    fn macos_major_version_parses_and_reads() {
+        assert_eq!(parse_major(b"26.7.1\0"), Some(26));
+        assert_eq!(parse_major(b"27.0"), Some(27));
+        assert_eq!(parse_major(b""), None);
+        assert_eq!(parse_major(b"x.1"), None);
+        assert!(macos_major() >= 11, "the running system reads as {}", macos_major());
+    }
+
+    #[test]
+    fn every_gesture_type_is_tapped() {
+        for ty in [ffi::EV_ROTATE, ffi::EV_BEGIN_GESTURE, ffi::EV_END_GESTURE, ffi::EV_GESTURE, ffi::EV_DOCK_CONTROL, ffi::EV_SWIPE, ffi::EV_SMART_MAGNIFY] {
+            assert!(is_gesture(ty) && EVENT_MASK & mask(ty) != 0, "type {ty}");
+        }
+        assert!(!is_gesture(ffi::EV_SCROLL_WHEEL));
+    }
+
+    #[test]
+    fn stop_source_wakes_long_run_loop_wait() {
+        for delay in [0, 20] {
+            let (tx, rx) = mpsc::channel();
+            let thread = thread::spawn(move || {
+                let run_loop = unsafe { ffi::CFRunLoopGetCurrent() };
+                let source = new_stop_source();
+                assert!(!source.is_null());
+                unsafe { ffi::CFRunLoopAddSource(run_loop, source, ffi::kCFRunLoopDefaultMode) };
+                tx.send((source as usize, run_loop as usize)).unwrap();
+                unsafe { ffi::CFRunLoopRunInMode(ffi::kCFRunLoopDefaultMode, 10.0, true) };
+                unsafe { ffi::CFRunLoopRemoveSource(run_loop, source, ffi::kCFRunLoopDefaultMode) };
+            });
+            let (source, run_loop) = rx.recv().unwrap();
+            thread::sleep(std::time::Duration::from_millis(delay));
+            let start = Instant::now();
+            wake_stop_source(source, run_loop as *mut c_void);
+            thread.join().unwrap();
+            assert!(start.elapsed().as_millis() < 100);
+            unsafe { ffi::CFRelease(source as ffi::CFTypeRef) };
+        }
+    }
 
     /// Records each fault and whether the cursor had already been shown when the fault arrived.
     struct RecSink {
@@ -687,7 +855,7 @@ mod fwd_tests {
         let guard = GrabGuard::new(Box::new(os), dir.join("grab.lock"));
         let mail = Mail::default();
         let screen = Rect { x: 0, y: 0, w: 1000, h: 800 };
-        let cfg = FwdConfig { peers: vec![PeerSpec { name: "p".into(), edge: Edge::Right, keys: flowseam_core::config::KeyMap::None }], policy: SwitchPolicy::default(), boundary_px: 2 };
+        let cfg = FwdConfig { peers: vec![PeerSpec { name: "p".into(), edge: Edge::Right, keys: flowseam_core::config::KeyMap::None, gestures: Default::default() }], policy: SwitchPolicy::default(), boundary_px: 2 };
         let mut f = Forwarder::new(cfg, vec![screen], EmitSink::new(NullEm, guard.clone()), mail.clone());
         f.link_up("p");
         let fwd = Arc::new(Mutex::new(f));

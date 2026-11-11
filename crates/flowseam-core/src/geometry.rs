@@ -285,6 +285,13 @@ pub fn entry_point(displays: &[Rect], edge: Edge, frac: u16) -> Result<Point, Ge
     Ok(clamp_to_nearest(displays, x, y))
 }
 
+/// Where the cursor lands for an `EnterCentered`: the middle of the display `entry_point` lands on, so the
+/// way back through `edge` is half that display away rather than `ENTRY_INSET`.
+pub fn center_point(displays: &[Rect], edge: Edge, frac: u16) -> Result<Point, GeomError> {
+    let at = entry_point(displays, edge, frac)?;
+    Ok(displays.iter().find(|r| contains(r, at)).map_or(at, |r| Point { x: r.x + r.w / 2, y: r.y + r.h / 2 }))
+}
+
 /// `p` itself when a display holds it; otherwise the nearest point inside a display's inset rectangle.
 /// `None` when there are no displays at all.
 pub fn clamp_inside(displays: &[Rect], p: Point) -> Option<Point> {
@@ -474,6 +481,27 @@ mod tests {
         // the clamp falls back to the display rect itself.
         let q = [r(0, 0, 10, 100)];
         assert_eq!(entry_point(&q, Edge::Left, 0).unwrap(), p(9, 0));
+    }
+
+    #[test]
+    fn centered_entry_lands_mid_display_on_the_edge_side() {
+        // The PC from the bounce: two monitors side by side, the way back through the left one's left edge.
+        let pc = [r(0, 0, 2560, 1440), r(2560, 0, 2560, 1440)];
+        for frac in [0, 0x8000, 65535] {
+            let c = center_point(&pc, Edge::Left, frac).unwrap();
+            assert_eq!(c, p(1280, 720), "frac {frac}");
+            assert!(!in_exit_strip(&pc, c, Edge::Left, 2));
+        }
+        assert_eq!(center_point(&pc, Edge::Right, 0).unwrap(), p(2560 + 1280, 720));
+        // Stacked along the edge: frac picks which display, as it does for an edge entry.
+        let stacked = [r(0, 0, 1920, 1080), r(0, 1080, 1920, 1080)];
+        assert_eq!(center_point(&stacked, Edge::Left, 0).unwrap(), p(960, 540));
+        assert_eq!(center_point(&stacked, Edge::Left, 65535).unwrap(), p(960, 1080 + 540));
+        // Different sizes, offset: the middle of the display on that side, not of the whole desktop.
+        let mixed = [r(0, 0, 1920, 1080), r(1920, -180, 2560, 1440)];
+        assert_eq!(center_point(&mixed, Edge::Right, 0x8000).unwrap(), p(1920 + 1280, -180 + 720));
+        assert_eq!(center_point(&mixed, Edge::Left, 0x8000).unwrap(), p(960, 540));
+        assert_eq!(center_point(&[], Edge::Left, 0), Err(GeomError::NoDisplays));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Platform backend boundary (design §4). flowseam_core defines only the trait
 //! surface; no OS API lives here.
 
-use crate::proto::{ModifierSet, Point, Rect};
+use crate::proto::{Gesture, ModifierSet, Point, Rect};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Permission {
@@ -29,6 +29,8 @@ pub enum CapturedEvent {
     Button { button: u8, down: bool },
     Motion { dx: i32, dy: i32 },
     Wheel { dx: i32, dy: i32 },
+    /// A trackpad gesture, once the capture side knows what it means.
+    Gesture(Gesture),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

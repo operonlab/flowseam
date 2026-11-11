@@ -7,7 +7,7 @@
 
 use crate::ffi::{self, CGDirectDisplayID};
 use crate::grab::{io_err, signal_pass, CursorOs, GrabGuard, WeakGrab};
-use crate::keymap::{flags_for, hid_to_keycode, is_modifier_hid, keycode_by_position};
+use crate::keymap::{flags_for, hid_to_keycode, is_modifier_hid, key_flags, keycode_by_position};
 use crate::state::{plan_recovery, RecoveryPlan};
 use crate::switch_gate::TapConfig;
 use crate::sys;
@@ -27,19 +27,30 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex, Once};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
+#[cfg(test)]
+use std::time::Duration;
 
 type DisplaySink = Mutex<Box<dyn Fn() + Send>>;
 
 /// Set by the signal handler, read by the watcher thread. Handler does nothing else.
 static PENDING_SIGNAL: AtomicI32 = AtomicI32::new(0);
+/// Published after the pipe exists; the handler only writes this one byte.
+static SIGNAL_PIPE_WRITE: AtomicI32 = AtomicI32::new(-1);
 /// Every armed grab, so the watcher can restore them all on a signal.
 static ARMED_GRABS: Mutex<Vec<WeakGrab>> = Mutex::new(Vec::new());
 static WATCH: Once = Once::new();
 
-/// Async-signal-safe: one atomic store.
+fn wait_signal(pipe: &crate::signal_pipe::SignalPipe, pending: &AtomicI32, grabs: &Mutex<Vec<WeakGrab>>) -> io::Result<Option<i32>> {
+    pipe.wait()?;
+    Ok(signal_pass(pending, grabs))
+}
+
+/// Async-signal-safe: record the signal and wake its blocking watcher.
 extern "C" fn on_terminate(sig: i32) {
     PENDING_SIGNAL.store(sig, Ordering::SeqCst);
+    // SAFETY: `write(2)` is async-signal-safe and the descriptor is nonblocking.
+    unsafe { crate::signal_pipe::notify_fd(SIGNAL_PIPE_WRITE.load(Ordering::Relaxed)) };
 }
 
 /// Register the grab for signal restore and, once per process, install SIGHUP/SIGINT/SIGTERM
@@ -55,17 +66,22 @@ fn arm_signal_restore(guard: &GrabGuard) {
         const SIGHUP: i32 = 1;
         const SIGINT: i32 = 2;
         const SIGTERM: i32 = 15;
+        let pipe = crate::signal_pipe::SignalPipe::new().expect("signal restore pipe");
+        SIGNAL_PIPE_WRITE.store(pipe.write_fd(), Ordering::SeqCst);
         let handler: extern "C" fn(i32) = on_terminate;
         for sig in [SIGHUP, SIGINT, SIGTERM] {
-            // SAFETY: `handler` is an `extern "C"` fn with the signal-handler ABI; it only stores to an atomic.
+            // SAFETY: `handler` is an `extern "C"` fn with the signal-handler ABI; it stores an atomic and writes one byte.
             unsafe { ffi::signal(sig, handler as usize) };
         }
-        thread::spawn(|| loop {
-            if let Some(sig) = signal_pass(&PENDING_SIGNAL, &ARMED_GRABS) {
-                eprintln!("flowseam: signal {sig}: cursor restored, exiting");
-                std::process::exit(128 + sig);
+        thread::spawn(move || loop {
+            match wait_signal(&pipe, &PENDING_SIGNAL, &ARMED_GRABS) {
+                Ok(Some(sig)) => {
+                    eprintln!("flowseam: signal {sig}: cursor restored, exiting");
+                    std::process::exit(128 + sig);
+                }
+                Ok(None) => {}
+                Err(_) => return,
             }
-            thread::sleep(Duration::from_millis(50));
         });
     });
 }
@@ -189,7 +205,7 @@ impl MacBackend {
     }
 
     fn post_key_for(&self, hid: u16, down: bool, repeat: bool, kc: u16) -> Result<(), BackendError> {
-        sys::post_key(kc, down, repeat, flags_for(self.keys.mods()), is_modifier_hid(hid))
+        sys::post_key(kc, down, repeat, flags_for(self.keys.mods()) | key_flags(hid), is_modifier_hid(hid))
     }
 
     fn set_grabbed(&mut self, grabbed: bool) -> Result<(), BackendError> {
@@ -823,5 +839,21 @@ mod arm_tests {
         );
         assert_eq!(r, Err(BackendError::PermissionMissing(Permission::Accessibility)));
         assert_eq!(armed, 0, "refused start must not install signal handlers");
+    }
+
+    #[test]
+    fn signal_watcher_blocks_until_handler_byte() {
+        let pipe = crate::signal_pipe::SignalPipe::new().unwrap();
+        let pending = AtomicI32::new(0);
+        let grabs = Mutex::new(Vec::new());
+        let (tx, rx) = std::sync::mpsc::channel();
+        thread::scope(|scope| {
+            scope.spawn(|| tx.send(wait_signal(&pipe, &pending, &grabs)).unwrap());
+            assert!(rx.recv_timeout(std::time::Duration::from_millis(100)).is_err());
+            assert_eq!(pipe.wait_count(), 1);
+            pending.store(15, Ordering::SeqCst);
+            pipe.notify();
+            assert_eq!(rx.recv_timeout(std::time::Duration::from_millis(100)).unwrap().unwrap(), Some(15));
+        });
     }
 }

@@ -69,19 +69,19 @@ fn pinned_handshake_then_hello_and_data_both_ways() {
     let client_pins = PinSet::new([fingerprint(&server_id.cert_der)]);
     let (listener, addr) = bind();
 
-    let (s_out_tx, s_out_rx) = channel::<Msg>();
+    let (s_out_tx, s_out_rx) = crossbeam_channel::unbounded::<Msg>();
     let (s_in_tx, s_in_rx) = channel::<Msg>();
-    let (c_out_tx, c_out_rx) = channel::<Msg>();
+    let (c_out_tx, c_out_rx) = crossbeam_channel::unbounded::<Msg>();
     let (c_in_tx, c_in_rx) = channel::<Msg>();
 
     let (sid, spins, sinfo) = (server_id.clone(), server_pins, server_info.clone());
     let server = thread::spawn(move || {
-        let ep = Endpoint { identity: &sid, pins: &spins, me: &sinfo, timing: timing(), speak_for: None, paths_for: None };
+        let ep = Endpoint { identity: &sid, pins: &spins, me: &sinfo, timing: timing(), speak_for: None, paths_for: None, monitors: &[] };
         link::serve_once(&listener, &ep, &s_out_rx, &s_in_tx)
     });
     let (cid, cpins, cinfo) = (client_id.clone(), client_pins, client_info.clone());
     let client = thread::spawn(move || {
-        let ep = Endpoint { identity: &cid, pins: &cpins, me: &cinfo, timing: timing(), speak_for: None, paths_for: None };
+        let ep = Endpoint { identity: &cid, pins: &cpins, me: &cinfo, timing: timing(), speak_for: None, paths_for: None, monitors: &[] };
         link::run_client_once(addr, &ep, &c_out_rx, &c_in_tx)
     });
 
@@ -119,21 +119,21 @@ fn client_refuses_a_server_whose_fingerprint_is_not_pinned() {
     let server_pins = PinSet::new([fingerprint(&client_id.cert_der)]);
     let (listener, addr) = bind();
 
-    let (s_out_tx, s_out_rx) = channel::<Msg>();
+    let (s_out_tx, s_out_rx) = crossbeam_channel::unbounded::<Msg>();
     let (s_in_tx, _s_in_rx) = channel::<Msg>();
     let (sid, sinfo) = (server_id.clone(), server_info.clone());
     let server = thread::spawn(move || {
-        let ep = Endpoint { identity: &sid, pins: &server_pins, me: &sinfo, timing: timing(), speak_for: None, paths_for: None };
+        let ep = Endpoint { identity: &sid, pins: &server_pins, me: &sinfo, timing: timing(), speak_for: None, paths_for: None, monitors: &[] };
         link::serve_once(&listener, &ep, &s_out_rx, &s_in_tx)
     });
 
-    let (c_out_tx, c_out_rx) = channel::<Msg>();
+    let (c_out_tx, c_out_rx) = crossbeam_channel::unbounded::<Msg>();
     let (c_in_tx, _c_in_rx) = channel::<Msg>();
     // Run the client on its own thread: if verification is broken the session
     // stays healthy on heartbeats, and the test must fail rather than hang.
     let (cid, cpins, cinfo) = (client_id.clone(), client_pins, client_info.clone());
     let client = thread::spawn(move || {
-        let ep = Endpoint { identity: &cid, pins: &cpins, me: &cinfo, timing: timing(), speak_for: None, paths_for: None };
+        let ep = Endpoint { identity: &cid, pins: &cpins, me: &cinfo, timing: timing(), speak_for: None, paths_for: None, monitors: &[] };
         link::run_client_once(addr, &ep, &c_out_rx, &c_in_tx)
     });
     let err = join_within(client, 10).expect_err("must refuse");
@@ -157,19 +157,19 @@ fn server_refuses_a_client_whose_fingerprint_is_not_pinned() {
     let client_pins = PinSet::new([fingerprint(&server_id.cert_der)]);
     let (listener, addr) = bind();
 
-    let (s_out_tx, s_out_rx) = channel::<Msg>();
+    let (s_out_tx, s_out_rx) = crossbeam_channel::unbounded::<Msg>();
     let (s_in_tx, _s_in_rx) = channel::<Msg>();
     let (sid, sinfo) = (server_id.clone(), server_info.clone());
     let server = thread::spawn(move || {
-        let ep = Endpoint { identity: &sid, pins: &server_pins, me: &sinfo, timing: timing(), speak_for: None, paths_for: None };
+        let ep = Endpoint { identity: &sid, pins: &server_pins, me: &sinfo, timing: timing(), speak_for: None, paths_for: None, monitors: &[] };
         link::serve_once(&listener, &ep, &s_out_rx, &s_in_tx)
     });
 
-    let (c_out_tx, c_out_rx) = channel::<Msg>();
+    let (c_out_tx, c_out_rx) = crossbeam_channel::unbounded::<Msg>();
     let (c_in_tx, _c_in_rx) = channel::<Msg>();
     let (cid, cpins, cinfo) = (client_id.clone(), client_pins, client_info.clone());
     let client = thread::spawn(move || {
-        let ep = Endpoint { identity: &cid, pins: &cpins, me: &cinfo, timing: timing(), speak_for: None, paths_for: None };
+        let ep = Endpoint { identity: &cid, pins: &cpins, me: &cinfo, timing: timing(), speak_for: None, paths_for: None, monitors: &[] };
         link::run_client_once(addr, &ep, &c_out_rx, &c_in_tx)
     });
     // TLS 1.3 lets the client finish before the server checks its certificate,
@@ -205,18 +205,18 @@ fn forged_node_hello(server_forges: bool) -> (Result<Outcome, NetError>, Result<
     let server_up = Arc::new(AtomicBool::new(false));
     let client_up = Arc::new(AtomicBool::new(false));
 
-    let (s_out_tx, s_out_rx) = channel::<Msg>();
+    let (s_out_tx, s_out_rx) = crossbeam_channel::unbounded::<Msg>();
     let (s_in_tx, _s_in_rx) = channel::<Msg>();
     let (sid, sinfo, sup) = (server_id.clone(), server_info, server_up.clone());
     let server = thread::spawn(move || {
-        let ep = Endpoint { identity: &sid, pins: &server_pins, me: &sinfo, timing: timing(), speak_for: None, paths_for: None };
+        let ep = Endpoint { identity: &sid, pins: &server_pins, me: &sinfo, timing: timing(), speak_for: None, paths_for: None, monitors: &[] };
         link::serve_once_with(&listener, &ep, &s_out_rx, &s_in_tx, &|_| sup.store(true, Ordering::SeqCst))
     });
-    let (c_out_tx, c_out_rx) = channel::<Msg>();
+    let (c_out_tx, c_out_rx) = crossbeam_channel::unbounded::<Msg>();
     let (c_in_tx, _c_in_rx) = channel::<Msg>();
     let (cid, cinfo, cup) = (client_id.clone(), client_info, client_up.clone());
     let client = thread::spawn(move || {
-        let ep = Endpoint { identity: &cid, pins: &client_pins, me: &cinfo, timing: timing(), speak_for: None, paths_for: None };
+        let ep = Endpoint { identity: &cid, pins: &client_pins, me: &cinfo, timing: timing(), speak_for: None, paths_for: None, monitors: &[] };
         link::run_client_once_with(addr, &ep, &c_out_rx, &c_in_tx, &|_| cup.store(true, Ordering::SeqCst))
     });
     // A session that wrongly came up would run on heartbeats; end it so the joins return.
@@ -253,12 +253,12 @@ fn reconnects_after_the_peer_drops_the_link() {
     // Client side: one long-lived run_client loop with a feeder that keeps
     // offering messages. A message written into a dead socket is lost, and
     // that is fine: the test only needs one to arrive on the second link.
-    let (c_out_tx, c_out_rx) = channel::<Msg>();
+    let (c_out_tx, c_out_rx) = crossbeam_channel::unbounded::<Msg>();
     let (c_in_tx, _c_in_rx) = channel::<Msg>();
     let stop = Arc::new(AtomicBool::new(false));
     let (cid, cpins, cinfo, stop_c) = (client_id.clone(), client_pins, client_info.clone(), stop.clone());
     let client = thread::spawn(move || {
-        let ep = Endpoint { identity: &cid, pins: &cpins, me: &cinfo, timing: timing(), speak_for: None, paths_for: None };
+        let ep = Endpoint { identity: &cid, pins: &cpins, me: &cinfo, timing: timing(), speak_for: None, paths_for: None, monitors: &[] };
         let mut backoff = Backoff::new(Duration::from_millis(20), Duration::from_millis(200));
         link::run_client(addr, &ep, &c_out_rx, &c_in_tx, &mut backoff, &stop_c)
     });
@@ -277,8 +277,8 @@ fn reconnects_after_the_peer_drops_the_link() {
 
     // Server, connection 1: complete Hello, then close at once (outgoing
     // sender dropped) so the client sees the link go away.
-    let ep = Endpoint { identity: &server_id, pins: &server_pins, me: &server_info, timing: timing(), speak_for: None, paths_for: None };
-    let (dead_tx, dead_rx) = channel::<Msg>();
+    let ep = Endpoint { identity: &server_id, pins: &server_pins, me: &server_info, timing: timing(), speak_for: None, paths_for: None, monitors: &[] };
+    let (dead_tx, dead_rx) = crossbeam_channel::unbounded::<Msg>();
     drop(dead_tx);
     let (in1_tx, _in1_rx) = channel::<Msg>();
     let first = link::serve_once(&listener, &ep, &dead_rx, &in1_tx);
@@ -286,10 +286,10 @@ fn reconnects_after_the_peer_drops_the_link() {
 
     // Server, connection 2: the client must come back on its own. Serve it on
     // a thread, read until a clipboard message arrives, then close.
-    let (keep_tx, keep_rx) = channel::<Msg>();
+    let (keep_tx, keep_rx) = crossbeam_channel::unbounded::<Msg>();
     let (in2_tx, in2_rx) = channel::<Msg>();
     let server2 = thread::spawn(move || {
-        let ep = Endpoint { identity: &server_id, pins: &server_pins, me: &server_info, timing: timing(), speak_for: None, paths_for: None };
+        let ep = Endpoint { identity: &server_id, pins: &server_pins, me: &server_info, timing: timing(), speak_for: None, paths_for: None, monitors: &[] };
         link::serve_once(&listener, &ep, &keep_rx, &in2_tx)
     });
     let got = in2_rx.recv_timeout(Duration::from_secs(10));

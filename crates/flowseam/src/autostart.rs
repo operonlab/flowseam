@@ -14,6 +14,24 @@ fn mac_status(code: isize) -> State {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
+/// Run at every start until it converges: the old main-app item goes only once the agent is on, so there is
+/// never a start with neither. An agent waiting for approval keeps the old item; an unregister that failed is
+/// tried again at the next start.
+fn migrate_if_needed(old: State, new: State, register: impl FnOnce() -> Result<State, String>, unregister: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+    if old != State::On { return Ok(()); }
+    match new {
+        State::On => unregister(),
+        State::NeedsApproval | State::Unknown(_) => Ok(()),
+        State::Off => match register()? {
+            State::On => unregister(),
+            State::NeedsApproval => Err(crate::i18n::tr("需要在『系統設定 › 一般 › 登入項目』允許").into()),
+            State::Unknown(why) => Err(why),
+            State::Off => Err(crate::i18n::tr("無法變更登入項目").into()),
+        },
+    }
+}
+
 #[cfg(any(windows, test))]
 fn windows_run_value(exe: &std::path::Path) -> Result<String, String> {
     let path = exe.to_str().ok_or_else(|| crate::i18n::tr("執行檔路徑不是有效的文字").to_string())?;
@@ -23,7 +41,7 @@ fn windows_run_value(exe: &std::path::Path) -> Result<String, String> {
 
 #[cfg(target_os = "macos")]
 mod platform {
-    use super::{mac_status, State};
+    use super::{mac_status, migrate_if_needed, State};
     use objc2::{class, msg_send};
     use objc2::runtime::AnyObject;
 
@@ -34,11 +52,29 @@ mod platform {
         std::env::current_exe().ok().is_some_and(|p| p.to_string_lossy().contains("/Flowseam.app/Contents/MacOS/"))
     }
 
+    unsafe fn service(agent: bool) -> Result<*mut AnyObject, String> {
+        let service: *mut AnyObject = if agent {
+            let name: *mut AnyObject = msg_send![class!(NSString), stringWithUTF8String: c"com.operonlab.flowseam.login.plist".as_ptr()];
+            msg_send![class!(SMAppService), agentServiceWithPlistName: name]
+        } else {
+            msg_send![class!(SMAppService), mainAppService]
+        };
+        if service.is_null() { Err(crate::i18n::tr("無法取得 Flowseam 登入項目").into()) } else { Ok(service) }
+    }
+
+    unsafe fn change(service: *mut AnyObject, on: bool) -> Result<(), String> {
+        let mut error: *mut AnyObject = std::ptr::null_mut();
+        let ok: bool = if on { msg_send![service, registerAndReturnError: &mut error] } else { msg_send![service, unregisterAndReturnError: &mut error] };
+        if ok { Ok(()) } else if error.is_null() { Err(crate::i18n::tr("無法變更登入項目").into()) } else {
+            let code: isize = msg_send![error, code];
+            Err(crate::i18n::trf("無法變更登入項目（錯誤代碼：{}）", &[&code]))
+        }
+    }
+
     pub fn state() -> State {
         if !bundled() { return State::Unknown(crate::i18n::tr("未從 Flowseam.app 啟動").into()); }
         unsafe {
-            let service: *mut AnyObject = msg_send![class!(SMAppService), mainAppService];
-            if service.is_null() { return State::Unknown(crate::i18n::tr("無法取得 Flowseam 登入項目").into()); }
+            let service = match service(true) { Ok(service) => service, Err(why) => return State::Unknown(why) };
             let code: isize = msg_send![service, status];
             mac_status(code)
         }
@@ -47,14 +83,22 @@ mod platform {
     pub fn set(on: bool) -> Result<(), String> {
         if !bundled() { return Err(crate::i18n::tr("未從 Flowseam.app 啟動").into()); }
         unsafe {
-            let service: *mut AnyObject = msg_send![class!(SMAppService), mainAppService];
-            if service.is_null() { return Err(crate::i18n::tr("無法取得 Flowseam 登入項目").into()); }
-            let mut error: *mut AnyObject = std::ptr::null_mut();
-            let ok: bool = if on { msg_send![service, registerAndReturnError: &mut error] } else { msg_send![service, unregisterAndReturnError: &mut error] };
-            if ok { Ok(()) } else if error.is_null() { Err(crate::i18n::tr("無法變更登入項目").into()) } else {
-                let code: isize = msg_send![error, code];
-                Err(crate::i18n::trf("無法變更登入項目（錯誤代碼：{}）", &[&code]))
-            }
+            change(service(true)?, on)
+        }
+    }
+
+    pub fn migrate_legacy_login() -> Result<(), String> {
+        if !bundled() { return Ok(()); }
+        unsafe {
+            let old = service(false)?;
+            let new = service(true)?;
+            let old_state: isize = msg_send![old, status];
+            let new_state: isize = msg_send![new, status];
+            migrate_if_needed(mac_status(old_state), mac_status(new_state), || {
+                change(new, true)?;
+                let code: isize = msg_send![new, status];
+                Ok(mac_status(code))
+            }, || change(old, false))
         }
     }
 
@@ -118,6 +162,36 @@ mod platform {
 pub use platform::{set, state};
 #[cfg(target_os = "macos")]
 pub use platform::open_settings;
+#[cfg(target_os = "macos")]
+pub use platform::migrate_legacy_login;
+
+/// The app bundle that holds `exe` (…/Flowseam.app/Contents/MacOS/flowseam), so the launcher opens this copy and
+/// not another one Launch Services might pick by bundle id.
+#[cfg(any(target_os = "macos", test))]
+fn bundle_of(exe: &std::path::Path) -> Option<std::path::PathBuf> {
+    let bundle = exe.parent()?.parent()?.parent()?;
+    (bundle.extension().is_some_and(|e| e == "app") && exe.parent()?.ends_with("Contents/MacOS")).then(|| bundle.to_owned())
+}
+
+/// Run by the login launch agent (`flowseam launch-at-login`). It opens the app hidden through Launch Services
+/// and returns, so the agent's job holds no process: unregistering an agent stops its process, and turning the
+/// option off must not quit the running app. It does nothing while Flowseam runs, which is also the case when
+/// the agent first runs at registration.
+#[cfg(target_os = "macos")]
+pub fn launch_at_login() -> i32 {
+    let dir = crate::config_dir();
+    match crate::single::claim(&dir) {
+        Ok(crate::single::Start::Second) => return 0,
+        Ok(crate::single::Start::First(guard)) => drop(guard),
+        Err(e) => eprintln!("flowseam: could not check for a running Flowseam ({e}); opening it anyway"),
+    }
+    let Some(bundle) = std::env::current_exe().ok().and_then(|exe| bundle_of(&exe)) else { eprintln!("flowseam: launch-at-login runs only from inside Flowseam.app"); return 1 };
+    match std::process::Command::new("/usr/bin/open").arg("-g").arg("-a").arg(&bundle).args(["--args", "--hidden"]).status() {
+        Ok(status) if status.success() => 0,
+        Ok(status) => { eprintln!("flowseam: open {} exited with {status}", bundle.display()); 1 }
+        Err(e) => { eprintln!("flowseam: could not run open: {e}"); 1 }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -135,5 +209,55 @@ mod tests {
     #[test]
     fn windows_command_quotes_spaces_and_hides() {
         assert_eq!(windows_run_value(std::path::Path::new(r"C:\Program Files\Flowseam\flowseam.exe")).unwrap(), r#""C:\Program Files\Flowseam\flowseam.exe" --hidden"#);
+    }
+
+    #[test]
+    fn the_launcher_opens_the_bundle_it_lives_in() {
+        assert_eq!(bundle_of(std::path::Path::new("/Applications/Flowseam.app/Contents/MacOS/flowseam")), Some("/Applications/Flowseam.app".into()));
+        assert_eq!(bundle_of(std::path::Path::new("/opt/x/target/release/flowseam")), None, "not in a bundle");
+        assert_eq!(bundle_of(std::path::Path::new("/a/b/Contents/MacOS/flowseam")), None);
+    }
+
+    #[test]
+    fn migration_registers_first_and_keeps_old_on_failure() {
+        let calls = std::cell::RefCell::new(Vec::new());
+        migrate_if_needed(State::On, State::Off, || { calls.borrow_mut().push("register"); Ok(State::On) }, || { calls.borrow_mut().push("unregister"); Ok(()) }).unwrap();
+        assert_eq!(*calls.borrow(), ["register", "unregister"]);
+        let mut unregistered = false;
+        assert!(migrate_if_needed(State::On, State::Off, || Err("register failed".into()), || { unregistered = true; Ok(()) }).is_err());
+        assert!(!unregistered);
+        assert!(migrate_if_needed(State::On, State::Off, || Ok(State::NeedsApproval), || { unregistered = true; Ok(()) }).is_err());
+        assert!(!unregistered);
+    }
+
+    #[test]
+    fn migration_converges_on_later_starts() {
+        let mut unregistered = 0;
+        migrate_if_needed(State::On, State::On, || panic!("must not register again"), || { unregistered += 1; Ok(()) }).unwrap();
+        assert_eq!(unregistered, 1, "agent already on: the old item still enabled is removed now");
+        migrate_if_needed(State::On, State::NeedsApproval, || panic!("must not register again"), || panic!("the old item stays until the agent is approved")).unwrap();
+        migrate_if_needed(State::Off, State::On, || panic!("nothing to migrate"), || panic!("nothing to migrate")).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn packaged_login_plist_starts_hidden_in_aqua() {
+        let root = std::env::temp_dir().join(format!("flowseam-login-plist-{}-{:?}", std::process::id(), std::thread::current().id()));
+        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/make-app.sh");
+        let output = std::process::Command::new("bash").arg(script).arg("--write-login-plist-for-test").arg(&root).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let plist = root.join("Contents/Library/LaunchAgents/com.operonlab.flowseam.login.plist");
+        let output = std::process::Command::new("plutil").args(["-convert", "json", "-o", "-"]).arg(&plist).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["Label"], "com.operonlab.flowseam.login");
+        assert_eq!(value["BundleProgram"], "Contents/MacOS/flowseam");
+        assert_eq!(value["ProgramArguments"], serde_json::json!(["flowseam", "launch-at-login"]), "a launcher that returns: unregistering the agent then stops no running app");
+        assert_eq!(value["RunAtLoad"], true);
+        assert_eq!(value["LimitLoadToSessionType"], "Aqua");
+        assert_eq!(value["ProcessType"], "Interactive");
+        assert_eq!(value["AssociatedBundleIdentifiers"], serde_json::json!(["com.operonlab.flowseam"]));
+        assert!(value.get("KeepAlive").is_none());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

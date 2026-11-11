@@ -1,6 +1,6 @@
 [package]
 name = "flowseam"
-version = "0.1.3"
+version = "0.1.4"
 license = "MIT"
 edition = "2021"
 
@@ -18,8 +18,10 @@ muda = { version = "=0.17.2", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 flowseam-mac = { path = "../flowseam-mac" }
+libc = "=0.2.191"
 objc2 = "=0.6.5"
 objc2-app-kit = { version = "=0.3.2", features = ["NSApplication", "NSRunningApplication"] }
+winit = "=0.30.13"
 
 [target.'cfg(windows)'.dependencies]
 flowseam-win = { path = "../flowseam-win" }

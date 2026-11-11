@@ -1,4 +1,25 @@
 {
+  "螢幕跟著一起切換": { "en": "Monitors switch too", "ja": "モニタも一緒に切り替え", "ko": "모니터도 함께 전환" },
+  "在 Apple 晶片的 Mac 上，可以加入同時接著另一台電腦的螢幕，並選好顯示那台的輸入來源。選單列的切換按鈕會先切勾選的螢幕，再切鍵盤滑鼠；有一台失敗就全部切回來。兩台都需要這一版。": { "en": "On a Mac with Apple silicon, add the monitors that are also cabled to another computer and pick the input that shows it. The switch button in the menu bar switches the ticked monitors first, then the keyboard and mouse; if one fails, they all switch back. Both computers need this version.", "ja": "Apple シリコン搭載の Mac では、別のコンピュータにもつながっているモニタを追加し、そのコンピュータを映す入力を選べます。メニューバーの切り替えボタンは、チェックしたモニタを先に切り替えてから、キーボードとマウスを切り替えます。1 台でも失敗するとすべて元に戻ります。両方のコンピュータにこのバージョンが必要です。", "ko": "Apple 실리콘 Mac에서는 다른 컴퓨터에도 연결된 모니터를 추가하고 그 컴퓨터를 보여 주는 입력을 고를 수 있습니다. 메뉴 막대의 전환 버튼은 선택한 모니터를 먼저 전환한 뒤 키보드와 마우스를 전환합니다. 하나라도 실패하면 모두 되돌아갑니다. 두 컴퓨터 모두 이 버전이 필요합니다." },
+  "觸控板手勢送到對方": { "en": "Trackpad gestures reach the other computer", "ja": "トラックパッドのジェスチャを相手に送信", "ko": "트랙패드 제스처를 상대 컴퓨터로" },
+  "切換空間、指揮中心、App Exposé、顯示桌面與 App 啟動器，會變成被操作那台電腦自己的快捷鍵，不再同時作用在這台 Mac 上。": { "en": "Switching spaces, Mission Control, App Exposé, Show Desktop and the app launcher become the controlled computer's own shortcuts, and no longer also act on this Mac.", "ja": "スペースの切り替え、Mission Control、App Exposé、デスクトップの表示、アプリランチャーは、操作しているコンピュータ自身のショートカットになり、この Mac では同時に動作しなくなりました。", "ko": "스페이스 전환, Mission Control, App Exposé, 데스크탑 보기, 앱 실행기가 제어 중인 컴퓨터의 단축키로 바뀌며, 더 이상 이 Mac에서 함께 동작하지 않습니다." },
+  "閒置時更安靜": { "en": "Quieter when idle", "ja": "待機中の負荷を軽減", "ko": "대기 중 부하 감소" },
+  "沒有動作時，Mac 上的背景程式幾乎不用 CPU。在一台同時連著兩台電腦的 Mac mini 上，從約 6.6% 降到 1% 以下。": { "en": "While nothing happens, the background process on a Mac uses almost no CPU: on a Mac mini sharing with two computers, from about 6.6% to under 1%.", "ja": "何も操作していないとき、Mac のバックグラウンドプロセスはほとんど CPU を使いません。2 台のコンピュータと共有している Mac mini で、約 6.6% から 1% 未満になりました。", "ko": "아무 작업도 없을 때 Mac의 백그라운드 프로세스는 CPU를 거의 쓰지 않습니다. 두 컴퓨터와 공유하는 Mac mini에서 약 6.6%에서 1% 미만으로 줄었습니다." },
+  "幾個修正": { "en": "Fixes", "ja": "修正", "ko": "수정 사항" },
+  "操作別台時按 Caps Lock 不會再讓背景程式當掉；從選單列切換後，不會過一下又自己切回來；被操作的 Mac 上，⌃↑、⌃← ⌃→ 和 F11 這類快捷鍵可以用了。": { "en": "Caps Lock no longer crashes the background process while controlling another computer; a switch from the menu bar no longer bounces back after a moment; on a Mac controlled from another computer, shortcuts such as ⌃↑, ⌃← ⌃→ and F11 work.", "ja": "別のコンピュータを操作中に Caps Lock を押しても、バックグラウンドプロセスが落ちなくなりました。メニューバーから切り替えた後、少しして勝手に戻ることもなくなりました。別のコンピュータから操作されている Mac で、⌃↑、⌃← ⌃→、F11 などのショートカットが使えるようになりました。", "ko": "다른 컴퓨터를 제어하는 중 Caps Lock을 눌러도 백그라운드 프로세스가 더 이상 멈추지 않습니다. 메뉴 막대에서 전환한 뒤 잠시 후 저절로 돌아가는 문제도 고쳤습니다. 다른 컴퓨터가 제어하는 Mac에서 ⌃↑, ⌃← ⌃→, F11 같은 단축키를 쓸 수 있습니다." },
+  "在 Dock 顯示圖示": { "en": "Show icon in Dock", "ja": "Dock にアイコンを表示", "ko": "Dock에 아이콘 표시" },
+  "啟用自動檢查後，Flowseam 每天會向 GitHub 查詢新版；也可以開啟版本頁查看。": { "en": "With automatic checks on, Flowseam checks GitHub daily; you can also open the releases page.", "ja": "自動確認を有効にすると、Flowseam は毎日 GitHub で新版を確認します。リリースページでも確認できます。", "ko": "자동 확인을 켜면 Flowseam이 매일 GitHub에서 새 버전을 확인합니다. 릴리스 페이지에서도 확인할 수 있습니다." },
+  "關掉後，開著設定視窗時 Dock 也不會出現 Flowseam": { "en": "When off, Flowseam stays out of the Dock even while Settings is open", "ja": "オフにすると、設定画面を開いていても Dock に Flowseam は表示されません", "ko": "끄면 설정 창을 열어도 Dock에 Flowseam이 표시되지 않습니다" },
+  "在選單列顯示圖示": { "en": "Show icon in menu bar", "ja": "メニューバーにアイコンを表示", "ko": "메뉴 막대에 아이콘 표시" },
+  "隱藏後，要開設定視窗，在 Finder 或 Spotlight 再開一次 Flowseam": { "en": "When hidden, reopen Flowseam from Finder or Spotlight to show Settings", "ja": "非表示にした後は、Finder または Spotlight から Flowseam を再度開くと設定が表示されます", "ko": "숨긴 후 설정을 열려면 Finder나 Spotlight에서 Flowseam을 다시 여세요" },
+  "自動檢查更新": { "en": "Check for updates automatically", "ja": "更新を自動確認", "ko": "업데이트 자동 확인" },
+  "每天向 GitHub 查一次有沒有新版；只提示，不會自動安裝": { "en": "Check GitHub once a day; notify only, without installing automatically", "ja": "1 日に 1 回 GitHub で新版を確認します。通知のみで自動インストールはしません", "ko": "하루에 한 번 GitHub에서 새 버전을 확인합니다. 알림만 표시하고 자동 설치하지 않습니다" },
+  "有新版：{}": { "en": "New version available: {}", "ja": "新しいバージョン：{}", "ko": "새 버전: {}" },
+  "有新版 {}": { "en": "New version {}", "ja": "新しいバージョン {}", "ko": "새 버전 {}" },
+  "上次檢查失敗：{}": { "en": "Last check failed: {}", "ja": "前回の確認に失敗：{}", "ko": "마지막 확인 실패: {}" },
+  "已是最新版": { "en": "Up to date", "ja": "最新版です", "ko": "최신 버전입니다" },
+  "略過這一版": { "en": "Skip This Version", "ja": "このバージョンをスキップ", "ko": "이 버전 건너뛰기" },
+  "無法儲存介面偏好：{}": { "en": "Could not save interface preferences: {}", "ja": "表示設定を保存できません：{}", "ko": "화면 설정을 저장할 수 없습니다: {}" },
   " 毫秒": {
     "en": " ms",
     "ja": " ミリ秒",
@@ -13,11 +34,6 @@
     "en": "What's New in Flowseam {}",
     "ja": "Flowseam {} の新機能",
     "ko": "Flowseam {}의 새로운 기능"
-  },
-  "Flowseam 不會自行連網。請到版本頁查看是否有新版本。": {
-    "en": "Flowseam never goes online by itself. Check the releases page for a newer version.",
-    "ja": "Flowseam が自分でネットに接続することはありません。新しいバージョンはリリースページで確認してください。",
-    "ko": "Flowseam은 스스로 인터넷에 연결하지 않습니다. 새 버전은 릴리스 페이지에서 확인하세요."
   },
   "Flowseam 的新功能": {
     "en": "What's New in Flowseam",
@@ -54,6 +70,12 @@
     "ja": "相手のコンピュータでのMacキーの扱い",
     "ko": "상대 컴퓨터에서 Mac 키를 해석하는 방식"
   },
+  "手勢對應": { "en": "Gesture Mapping", "ja": "ジェスチャの割り当て", "ko": "제스처 매핑" },
+  "Mac 觸控板的手勢到對方怎麼解讀": { "en": "How the other computer interprets Mac trackpad gestures", "ja": "相手のコンピュータでのMacトラックパッドのジェスチャの扱い", "ko": "상대 컴퓨터에서 Mac 트랙패드 제스처를 해석하는 방식" },
+  "依 Mac 手勢（下滑＝所有視窗）": { "en": "Mac gestures (swipe down: all windows)", "ja": "Macのジェスチャ（下にスワイプ＝すべてのウインドウ）", "ko": "Mac 제스처(아래로 쓸기 = 모든 윈도우)" },
+  "依 Windows 觸控板（下滑＝顯示桌面）": { "en": "Windows touchpad (swipe down: show desktop)", "ja": "Windowsのタッチパッド（下にスワイプ＝デスクトップを表示）", "ko": "Windows 터치패드(아래로 쓸기 = 바탕 화면 보기)" },
+  "跟著按鍵對應：依 Mac 快捷鍵用 Mac 手勢，依鍵盤位置用 Windows 觸控板。按一下解鎖，自己選": { "en": "Follows Key Mapping: Mac shortcuts use Mac gestures, key position uses the Windows touchpad. Click to unlock and choose.", "ja": "キーの割り当てに連動：MacのショートカットならMacのジェスチャ、キーの位置ならWindowsのタッチパッド。クリックでロックを解除して選択", "ko": "키 매핑을 따름: Mac 단축키는 Mac 제스처, 키 위치는 Windows 터치패드. 클릭하면 잠금을 풀고 직접 선택" },
+  "按一下鎖定，跟著按鍵對應": { "en": "Click to lock and follow Key Mapping", "ja": "クリックでロックし、キーの割り当てに連動", "ko": "클릭하면 잠그고 키 매핑을 따름" },
   "Releases 頁面提供編譯好的 Windows 版，不必再從原始碼建置。": {
     "en": "The Releases page has a ready-built Windows version, so there is no need to build it from source.",
     "ja": "Releases ページにビルド済みの Windows 版があり、ソースからビルドする必要はなくなりました。",
@@ -223,6 +245,188 @@
     "en": "Share keyboard and mouse",
     "ja": "キーボードとマウスを共有",
     "ko": "키보드와 마우스 공유"
+  },
+  "切到 {}（鍵鼠）": {
+    "en": "Switch to {} (keyboard and mouse)",
+    "ja": "{} に切り替え（キーボードとマウス）",
+    "ko": "{}(으)로 전환 (키보드와 마우스)"
+  },
+  "切到 {}（螢幕＋鍵鼠）": {
+    "en": "Switch to {} (display, keyboard and mouse)",
+    "ja": "{} に切り替え（画面・キーボード・マウス）",
+    "ko": "{}(으)로 전환 (화면, 키보드, 마우스)"
+  },
+  "螢幕切換中…": {
+    "en": "Switching the display…",
+    "ja": "画面を切り替えています…",
+    "ko": "화면 전환 중…"
+  },
+  "螢幕切換失敗：{}": {
+    "en": "Display switch failed: {}",
+    "ja": "画面の切り替えに失敗しました：{}",
+    "ko": "화면 전환 실패: {}"
+  },
+  "螢幕切換": {
+    "en": "Display switch",
+    "ja": "画面の切り替え",
+    "ko": "화면 전환"
+  },
+  "對方用的輸入": {
+    "en": "Its input",
+    "ja": "相手の入力",
+    "ko": "상대의 입력"
+  },
+  "這台電腦接在螢幕的哪個輸入": {
+    "en": "Which of the display's inputs this computer is plugged into",
+    "ja": "このコンピュータが画面のどの入力につながっているか",
+    "ko": "이 컴퓨터가 화면의 어느 입력에 연결되어 있는지"
+  },
+  "開啟共用後才能讀取螢幕": {
+    "en": "Turn sharing on to read the display",
+    "ja": "共有をオンにすると画面を読み取れます",
+    "ko": "공유를 켜야 화면을 읽을 수 있습니다"
+  },
+  "讀取螢幕的輸入…": {
+    "en": "Reading the display's inputs…",
+    "ja": "画面の入力を読み取っています…",
+    "ko": "화면 입력을 읽는 중…"
+  },
+  "重新讀取": {
+    "en": "Read again",
+    "ja": "もう一度読み取る",
+    "ko": "다시 읽기"
+  },
+  "螢幕沒有列出它的輸入": {
+    "en": "The display does not list its inputs",
+    "ja": "画面が入力の一覧を返しません",
+    "ko": "화면이 입력 목록을 알려 주지 않습니다"
+  },
+  "切過去看一眼，確認那個輸入接的就是這台": {
+    "en": "Switch over for a look, to confirm that input is this computer",
+    "ja": "切り替えて見て、その入力がこのコンピュータであることを確かめる",
+    "ko": "잠깐 전환해서 그 입력이 이 컴퓨터인지 확인"
+  },
+  "已確認": {
+    "en": "Confirmed",
+    "ja": "確認済み",
+    "ko": "확인됨"
+  },
+  "尚未確認": {
+    "en": "Not confirmed",
+    "ja": "未確認",
+    "ko": "확인 안 됨"
+  },
+  "測試中…": {
+    "en": "Testing…",
+    "ja": "テスト中…",
+    "ko": "테스트 중…"
+  },
+  "測試": {
+    "en": "Test",
+    "ja": "テスト",
+    "ko": "테스트"
+  },
+  "{} 會切到 {}，{} 秒後自動切回 {}。這段時間看不到這台 Mac 的畫面，鍵盤和滑鼠會留在 Mac。": {
+    "en": "{} will switch to {}, then after {} seconds come back to {}. Until then this Mac's screen is not on it; the keyboard and mouse stay on the Mac.",
+    "ja": "{} は {} に切り替わり、{} 秒後に自動で {} に戻ります。その間この Mac の画面は表示されず、キーボードとマウスは Mac のままです。",
+    "ko": "{}이(가) {}(으)로 전환되고 {}초 뒤 자동으로 {}(으)로 돌아옵니다. 그동안 이 Mac 화면은 보이지 않으며 키보드와 마우스는 Mac에 남습니다."
+  },
+  "測試 {} 的輸入": {
+    "en": "Test {}'s input",
+    "ja": "{} の入力をテスト",
+    "ko": "{}의 입력 테스트"
+  },
+  "開始測試": {
+    "en": "Start test",
+    "ja": "テストを開始",
+    "ko": "테스트 시작"
+  },
+  "剛剛 {} 顯示的是什麼？": {
+    "en": "What did {} show just now?",
+    "ja": "さっき {} に映っていたのは？",
+    "ko": "방금 {}에 무엇이 보였나요?"
+  },
+  "{} 切到 {} 的那幾秒": {
+    "en": "The seconds {} was on {}",
+    "ja": "{} が {} に切り替わっていた数秒間",
+    "ko": "{}이(가) {}에 있던 몇 초 동안"
+  },
+  "{} 的畫面": {
+    "en": "{}'s screen",
+    "ja": "{} の画面",
+    "ko": "{}의 화면"
+  },
+  "別台電腦的畫面": {
+    "en": "Another computer's screen",
+    "ja": "別のコンピュータの画面",
+    "ko": "다른 컴퓨터의 화면"
+  },
+  "黑畫面或沒有訊號": {
+    "en": "Black, or no signal",
+    "ja": "真っ暗、または信号なし",
+    "ko": "검은 화면 또는 신호 없음"
+  },
+  "螢幕沒有切到 {}：{}": {
+    "en": "The display did not switch to {}: {}",
+    "ja": "画面が {} に切り替わりませんでした：{}",
+    "ko": "화면이 {}(으)로 전환되지 않았습니다: {}"
+  },
+  "好": {
+    "en": "OK",
+    "ja": "OK",
+    "ko": "확인"
+  },
+  "{} 會一起切到 {} 用的輸入，{} 秒後自動切回。這段時間看不到這台 Mac 的畫面，鍵盤和滑鼠會留在 Mac。": { "en": "{} will switch together to the inputs {} uses, then after {} seconds come back. Until then this Mac's screen is not on them; the keyboard and mouse stay on the Mac.", "ja": "{} は {} の入力にまとめて切り替わり、{} 秒後に自動で戻ります。その間この Mac の画面は表示されず、キーボードとマウスは Mac のままです。", "ko": "{}이(가) {}의 입력으로 함께 전환되고 {}초 뒤 자동으로 돌아옵니다. 그동안 이 Mac 화면은 보이지 않으며 키보드와 마우스는 Mac에 남습니다." },
+  "全部測試": { "en": "Test All", "ja": "すべてテスト", "ko": "모두 테스트" },
+  "切到 {} 用的輸入的那幾秒": { "en": "The seconds they were on {}'s inputs", "ja": "{} の入力に切り替わっていた数秒間", "ko": "{}의 입력에 있던 몇 초 동안" },
+  "剛剛這幾台螢幕顯示的是什麼？": { "en": "What did these displays show just now?", "ja": "さっきこれらの画面に映っていたのは？", "ko": "방금 이 화면들에 무엇이 보였나요?" },
+  "已確認並儲存。": { "en": "Confirmed and saved.", "ja": "確認して保存しました。", "ko": "확인하고 저장했습니다." },
+  "已確認。": { "en": "Confirmed.", "ja": "確認しました。", "ko": "확인했습니다." },
+  "已確認，但沒能儲存：{}": { "en": "Confirmed, but not saved: {}", "ja": "確認しましたが、保存できませんでした：{}", "ko": "확인했지만 저장하지 못했습니다: {}" },
+  "設定還沒儲存過": { "en": "The settings have not been saved yet", "ja": "設定がまだ保存されていません", "ko": "설정이 아직 저장되지 않았습니다" },
+  "{} 還沒儲存": { "en": "{} is not saved yet", "ja": "{} はまだ保存されていません", "ko": "{}이(가) 아직 저장되지 않았습니다" },
+  "確認": { "en": "Confirm", "ja": "確定", "ko": "확인" },
+  "螢幕沒有切換：{}": { "en": "The displays did not switch: {}", "ja": "画面が切り替わりませんでした：{}", "ko": "화면이 전환되지 않았습니다: {}" },
+  "還沒確認的螢幕一起切過去測試；都確認過了就全部重測": { "en": "Tests the unconfirmed displays together; once all are confirmed, tests them all again", "ja": "未確認の画面をまとめて切り替えてテストします。すべて確認済みなら全部をもう一度テストします", "ko": "확인되지 않은 화면을 함께 전환해 테스트합니다. 모두 확인되었으면 전부 다시 테스트합니다" },
+  "這個輸入接的不是 {}，換一個輸入再測試。": {
+    "en": "That input is not {}. Pick another input and test again.",
+    "ja": "その入力は {} ではありません。別の入力を選んでもう一度テストしてください。",
+    "ko": "그 입력은 {}이(가) 아닙니다. 다른 입력을 골라 다시 테스트하세요."
+  },
+  "這個輸入沒有訊號，換一個輸入再測試。": {
+    "en": "That input has no signal. Pick another input and test again.",
+    "ja": "その入力には信号がありません。別の入力を選んでもう一度テストしてください。",
+    "ko": "그 입력에는 신호가 없습니다. 다른 입력을 골라 다시 테스트하세요."
+  },
+  "儲存設定後才會切換螢幕": {
+    "en": "Save the settings to switch the display",
+    "ja": "設定を保存すると画面も切り替わります",
+    "ko": "설정을 저장해야 화면이 전환됩니다"
+  },
+  "沒有回應": {
+    "en": "no response",
+    "ja": "応答なし",
+    "ko": "응답 없음"
+  },
+  "測試沒有開始：{}": {
+    "en": "The test did not start: {}",
+    "ja": "テストは始まりませんでした：{}",
+    "ko": "테스트가 시작되지 않았습니다: {}"
+  },
+  "正在檢查螢幕…": {
+    "en": "Checking the display…",
+    "ja": "画面を確認しています…",
+    "ko": "화면 확인 중…"
+  },
+  "回到 {}": {
+    "en": "Back to {}",
+    "ja": "{} に戻る",
+    "ko": "{}(으)로 돌아가기"
+  },
+  "無法切換：{}": {
+    "en": "Could not switch: {}",
+    "ja": "切り替えられませんでした：{}",
+    "ko": "전환할 수 없음: {}"
   },
   "切到另一台電腦時，音量和播放鍵也會送到對方。": {
     "en": "While you control another computer, volume and playback keys go to it too.",
@@ -1078,5 +1282,96 @@
     "en": "＋ Add Device",
     "ja": "＋ デバイスを追加",
     "ko": "＋ 기기 추가"
+  },
+  "先選這台 Mac 用的輸入": {
+    "en": "Pick this Mac's input first",
+    "ja": "先にこの Mac の入力を選んでください",
+    "ko": "먼저 이 Mac의 입력을 선택하세요"
+  },
+  "切到這台時，一起切換的螢幕": {
+    "en": "Displays that switch along when you switch to this one",
+    "ja": "このデバイスに切り替えるときに一緒に切り替える画面",
+    "ko": "이 기기로 전환할 때 함께 전환할 화면"
+  },
+  "{}（未確認）": { "en": "{} (unconfirmed)", "ja": "{}（未確認）", "ko": "{}(미확인)" },
+  "無法確認：{}": {
+    "en": "Can't check: {}",
+    "ja": "確認できません：{}",
+    "ko": "확인할 수 없음: {}"
+  },
+  "不能切換：{}": {
+    "en": "Can't switch: {}",
+    "ja": "切り替えできません：{}",
+    "ko": "전환할 수 없음: {}"
+  },
+  "無法記下螢幕的勾選：{}": {
+    "en": "Couldn't save the display choice: {}",
+    "ja": "画面の選択を保存できませんでした：{}",
+    "ko": "화면 선택을 저장할 수 없음: {}"
+  },
+  "無法讀取螢幕的勾選：{}": {
+    "en": "Couldn't read the display choice: {}",
+    "ja": "画面の選択を読み込めませんでした：{}",
+    "ko": "화면 선택을 읽을 수 없음: {}"
+  },
+  "移除": {
+    "en": "Remove",
+    "ja": "削除",
+    "ko": "제거"
+  },
+  "螢幕沒有回報目前的輸入，請自己選": {
+    "en": "The display didn't report its current input; pick it yourself",
+    "ja": "画面が現在の入力を返さなかったので、自分で選んでください",
+    "ko": "화면이 현재 입력을 알려주지 않았습니다. 직접 선택하세요"
+  },
+  "這台 Mac 用的輸入": {
+    "en": "This Mac's input",
+    "ja": "この Mac の入力",
+    "ko": "이 Mac의 입력"
+  },
+  "＋ 加入螢幕": {
+    "en": "+ Add display",
+    "ja": "＋ 画面を追加",
+    "ko": "+ 화면 추가"
+  },
+  "切換": {
+    "en": "Switch",
+    "ja": "切り替え",
+    "ko": "전환"
+  },
+  "切到 {}": {
+    "en": "Switch to {}",
+    "ja": "{} に切り替える",
+    "ko": "{}(으)로 전환"
+  },
+  "回去": {
+    "en": "Go back",
+    "ja": "戻る",
+    "ko": "돌아가기"
+  },
+  "螢幕＋鍵鼠": {
+    "en": "Displays + keyboard and mouse",
+    "ja": "画面＋キーボードとマウス",
+    "ko": "화면 + 키보드와 마우스"
+  },
+  "只切鍵鼠": {
+    "en": "Keyboard and mouse only",
+    "ja": "キーボードとマウスのみ",
+    "ko": "키보드와 마우스만"
+  },
+  "鍵盤和滑鼠交回去，對方的螢幕也一起切回": {
+    "en": "Hand the keyboard and mouse back; that computer's displays switch back too",
+    "ja": "キーボードとマウスを返し、相手の画面も一緒に戻します",
+    "ko": "키보드와 마우스를 돌려주고 상대의 화면도 함께 되돌립니다"
+  },
+  "螢幕切回": {
+    "en": "Displays back",
+    "ja": "画面を戻す",
+    "ko": "화면 되돌리기"
+  },
+  "把這台的螢幕都切回這台 Mac": {
+    "en": "Switch all of its displays back to this Mac",
+    "ja": "このデバイスの画面をすべてこの Mac に戻します",
+    "ko": "이 기기의 화면을 모두 이 Mac으로 되돌립니다"
   }
 }

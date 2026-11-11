@@ -155,30 +155,16 @@ pub fn cursor_position() -> Result<Point, BackendError> {
     Ok(pixel_at(loc.x, loc.y))
 }
 
-/// Subtype and data1 of a system-defined event, through NSEvent (CoreGraphics has no field for them).
-/// `None` if NSEvent cannot read the event.
+/// Subtype and data1 of a system-defined event, from its CGEvent fields. Not through NSEvent: on the tap
+/// thread, `eventWithCGEvent:` of a Caps Lock event runs HIToolbox's input-source switching, which asserts
+/// the main queue (SIGILL, MBP worker, 2026-11-10 01:01).
 ///
 /// # Safety
 /// `ev` must be a live CGEvent.
-pub unsafe fn system_defined(ev: ffi::CGEventRef) -> Option<(i16, i64)> {
-    type FromCg = unsafe extern "C" fn(*mut c_void, *mut c_void, ffi::CGEventRef) -> *mut c_void;
-    type GetI16 = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i16;
-    type GetI64 = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i64;
-    type Untyped = unsafe extern "C" fn();
-    let send = ffi::objc_msgSend as Untyped;
-    // SAFETY: each cast matches the method's Objective-C signature on arm64 and x86_64 (integer
-    // returns); the pool drains the autoreleased NSEvent on this non-main thread.
+pub unsafe fn system_defined(ev: ffi::CGEventRef) -> (i16, i64) {
+    // SAFETY: reading integer fields of a live event.
     unsafe {
-        let pool = ffi::objc_autoreleasePoolPush();
-        let class = ffi::objc_getClass(c"NSEvent".as_ptr());
-        let ns = std::mem::transmute::<Untyped, FromCg>(send)(class, ffi::sel_registerName(c"eventWithCGEvent:".as_ptr()), ev);
-        let out = (!ns.is_null()).then(|| {
-            let subtype = std::mem::transmute::<Untyped, GetI16>(send)(ns, ffi::sel_registerName(c"subtype".as_ptr()));
-            let data1 = std::mem::transmute::<Untyped, GetI64>(send)(ns, ffi::sel_registerName(c"data1".as_ptr()));
-            (subtype, data1)
-        });
-        ffi::objc_autoreleasePoolPop(pool);
-        out
+        (ffi::CGEventGetIntegerValueField(ev, ffi::F_SYSTEM_SUBTYPE) as i16, ffi::CGEventGetIntegerValueField(ev, ffi::F_SYSTEM_DATA1))
     }
 }
 
@@ -331,11 +317,36 @@ extern "C" {
     fn objc_autoreleasePoolPop(pool: *mut c_void);
 }
 
+/// Every NSPasteboard call in this file holds this. Two threads on one pasteboard at once crash in AppKit:
+/// two readers of a private pasteboard died with SIGSEGV in 3 runs of 3, and lived with a lock (a Swift probe,
+/// 2026-11-10). Each link's clipboard pump reads the general pasteboard on a thread of its own, and the worker
+/// crashed in `pasteboard_read_text`'s pool pop (mini, 2026-11-09 16:59).
+// ponytail: covers this file's callers only; AppKit's own main-thread writes (a native drag starting) are
+// outside it. Locking `beginDraggingSession` too risks waiting on our own file promises; do it if a crash says so.
+static PASTEBOARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn pasteboard_lock() -> std::sync::MutexGuard<'static, ()> {
+    PASTEBOARD.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The lock and an autorelease pool, in one: fields drop in declaration order, so the pool drains (the pop
+/// that crashed) before the lock is let go, and every user gets the same order.
+struct PasteboardAccess {
+    _pool: Pool,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+fn pasteboard_access() -> PasteboardAccess {
+    let lock = pasteboard_lock();
+    PasteboardAccess { _pool: Pool::new(), _lock: lock }
+}
+
 /// `[[NSPasteboard generalPasteboard] changeCount]`. Read-only; bumps on any
 /// clipboard write by any process.
 pub fn pasteboard_change_count() -> Result<i64, BackendError> {
     type SendObj = extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void;
     type SendInt = extern "C" fn(*mut c_void, *mut c_void) -> isize;
+    let _pb = pasteboard_access();
     unsafe {
         let cls = objc_getClass(c"NSPasteboard".as_ptr());
         if cls.is_null() {
@@ -399,7 +410,7 @@ unsafe fn ns_string(s: &std::ffi::CStr) -> Result<*mut c_void, String> {
 pub fn pasteboard_read_text() -> Result<Option<String>, String> {
     type SendObj1 = extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> *mut c_void;
     type SendCStr = extern "C" fn(*mut c_void, *mut c_void) -> *const std::ffi::c_char;
-    let _pool = Pool::new();
+    let _pb = pasteboard_access();
     unsafe {
         let pb = general_pasteboard()?;
         let ty = ns_string(UTF8_TYPE)?;
@@ -422,7 +433,7 @@ pub fn pasteboard_write_text(s: &str) -> Result<(), String> {
     type SendInt = extern "C" fn(*mut c_void, *mut c_void) -> isize;
     type SendSetStr = extern "C" fn(*mut c_void, *mut c_void, *mut c_void, *mut c_void) -> i8;
     let c = std::ffi::CString::new(s).map_err(|_| "text contains NUL".to_string())?;
-    let _pool = Pool::new();
+    let _pb = pasteboard_access();
     unsafe {
         let pb = general_pasteboard()?;
         let val = ns_string(&c)?;
@@ -457,7 +468,7 @@ unsafe fn drag_pasteboard() -> Result<*mut c_void, String> {
 
 pub fn drag_change_count() -> Result<u64, String> {
     type SendInt = extern "C" fn(*mut c_void, *mut c_void) -> isize;
-    let _pool = Pool::new();
+    let _pb = pasteboard_access();
     unsafe {
         let pb = drag_pasteboard()?;
         let send: SendInt = std::mem::transmute::<*const (), SendInt>(objc_msgSend as *const ());
@@ -471,9 +482,12 @@ pub fn drag_change_count() -> Result<u64, String> {
 /// pasteboard mid-loop, and the exception aborted the worker (crash report 2026-11-05 20:17, a link thread).
 /// `filePathURL` also resolves the file-reference form (`file:///.file/id=…`) to a path.
 pub fn drag_files() -> Result<Vec<std::path::PathBuf>, String> {
+    let _pb = pasteboard_access();
     // SAFETY: a static NSString exported by AppKit.
     let name = unsafe { objc2_app_kit::NSPasteboardNameDrag };
-    files_on(&objc2_app_kit::NSPasteboard::pasteboardWithName(name))
+    // Bound, so it is released before `_pb` lets the lock go.
+    let pb = objc2_app_kit::NSPasteboard::pasteboardWithName(name);
+    files_on(&pb)
 }
 
 /// What `files_on` answers for a file reference URL whose file is gone (dragged, then deleted).
@@ -684,8 +698,69 @@ impl flowseam_core::clipboard::ClipboardOs for MacClipboard {
 }
 
 #[cfg(test)]
+mod system_defined_tests {
+    use super::*;
+
+    /// A system-defined event as NSEvent builds it, and what `system_defined` reads off its CGEvent.
+    fn read_back(subtype: i16, data1: i64) -> (i16, i64) {
+        use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType};
+        objc2::rc::autoreleasepool(|_| {
+            let ev = NSEvent::otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2(
+                NSEventType::SystemDefined, objc2_foundation::NSPoint::new(0.0, 0.0), NSEventModifierFlags(0), 0.0, 0, None,
+                subtype, data1 as isize, -1,
+            )
+            .expect("NSEvent");
+            // SAFETY: as in `post_media_key`: the event's own CGEventRef, alive while `ev` is.
+            let cg = unsafe {
+                type SendObj = extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void;
+                let send: SendObj = std::mem::transmute::<*const (), SendObj>(objc_msgSend as *const ());
+                send(objc2::rc::Retained::as_ptr(&ev) as *mut c_void, sel_registerName(c"CGEvent".as_ptr()))
+            } as ffi::CGEventRef;
+            assert!(!cg.is_null());
+            // SAFETY: a live event.
+            unsafe { system_defined(cg) }
+        })
+    }
+
+    /// The fields are undocumented: this fails if a macOS moves them, rather than media keys going quiet.
+    #[test]
+    fn subtype_and_data1_read_as_nsevent_wrote_them() {
+        for (subtype, data1) in [(8, 0x0010_0A00), (8, 0x0011_0B00), (7, 0x0000_0A00), (8, 0x0004_0A00)] {
+            assert_eq!(read_back(subtype, data1), (subtype, data1));
+        }
+        // Read back, a play press is the media key it was, and Caps Lock's aux event (type 4) is none.
+        let (st, d1) = read_back(8, 0x0010_0A00);
+        assert_eq!(crate::keymap::aux_key(st, d1), Some((crate::keymap::HID_PLAY_PAUSE, true)));
+        let (st, d1) = read_back(8, 0x0004_0A00);
+        assert_eq!(crate::keymap::aux_key(st, d1), None);
+    }
+}
+
+#[cfg(test)]
 mod pasteboard_tests {
     use super::*;
+
+    /// Each reader waits for the pasteboard lock: held here, none of them finishes until it is let go. Only
+    /// reads, so the clipboard is left as it was; `pasteboard_write_text` takes the lock the same way.
+    #[test]
+    fn every_pasteboard_read_waits_for_the_lock() {
+        type Reader = (&'static str, fn() -> bool);
+        let readers: [Reader; 4] = [
+            ("change count", || pasteboard_change_count().is_ok()),
+            ("text", || pasteboard_read_text().is_ok()),
+            ("drag change count", || drag_change_count().is_ok()),
+            ("drag files", || { let _ = drag_files(); true }),
+        ];
+        for (name, read) in readers {
+            let held = pasteboard_lock();
+            let (tx, rx) = std::sync::mpsc::channel();
+            let reader = std::thread::spawn(move || tx.send(read()).unwrap());
+            assert!(rx.recv_timeout(std::time::Duration::from_millis(300)).is_err(), "{name} read the pasteboard while it was locked");
+            drop(held);
+            assert!(rx.recv_timeout(std::time::Duration::from_secs(5)).expect("finishes once unlocked"), "{name}");
+            reader.join().unwrap();
+        }
+    }
 
     /// Touches the real clipboard: run only with explicit consent. Restores the original text.
     #[test]

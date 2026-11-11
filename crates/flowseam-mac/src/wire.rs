@@ -48,7 +48,12 @@ impl<E: InputEmitter + Send, O: Outbox + Send> ForwardSink<E, O> {
 impl<E: InputEmitter + Send, O: Outbox + Send> CaptureSink for ForwardSink<E, O> {
     fn on_event(&mut self, ev: CapturedEvent) -> Disposition {
         let now = (self.now)();
-        let d = self.fwd.lock().unwrap_or_else(|e| e.into_inner()).on_captured(ev, now);
+        let (d, need) = {
+            let mut f = self.fwd.lock().unwrap_or_else(|e| e.into_inner());
+            let d = f.on_captured(ev, now);
+            (d, f.needs_tick())
+        };
+        if need { crate::front::wake_if_idle(); }
         self.settle(d)
     }
 
@@ -61,7 +66,12 @@ impl<E: InputEmitter + Send, O: Outbox + Send> CaptureSink for ForwardSink<E, O>
                 None => eprintln!("flowseam: display list unavailable; keeping the last one"),
             }
         }
-        self.fwd.lock().unwrap_or_else(|e| e.into_inner()).on_cursor(pos, now);
+        let need = {
+            let mut f = self.fwd.lock().unwrap_or_else(|e| e.into_inner());
+            f.on_cursor(pos, now);
+            f.needs_tick()
+        };
+        if need { crate::front::wake_if_idle(); }
         self.settle(Disposition::Pass);
     }
 

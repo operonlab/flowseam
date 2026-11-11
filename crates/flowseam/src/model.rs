@@ -1,7 +1,8 @@
 //! Pure conversion between the GUI's editable state and `flowseam_core::config::Config`.
 //! No egui types here so it can be tested without a window.
 
-use flowseam_core::config::{Config, ConfigError, Edge, KeyMap, Peer, Switch};
+use flowseam_core::config::{Config, ConfigError, DisplaySwitch, Edge, GestureMap, KeyMap, Peer, Switch};
+use flowseam_core::gesture::Habit;
 
 pub const EDGES: [Edge; 4] = [Edge::Left, Edge::Right, Edge::Top, Edge::Bottom];
 
@@ -37,6 +38,9 @@ pub struct PeerRow {
     /// 64 hex chars once paired; empty before.
     pub fingerprint: String,
     pub keys: KeyMap,
+    pub gestures: GestureMap,
+    /// The monitors that switch with this peer, edited in the settings' monitor rows.
+    pub displays: Vec<DisplaySwitch>,
 }
 
 /// Choices in the order the GUI lists them; the default first.
@@ -48,6 +52,22 @@ pub fn keys_label(k: KeyMap) -> &'static str {
         KeyMap::Position => crate::i18n::tr("依鍵盤位置（⌥=Win、⌘=Alt）"),
         KeyMap::Mac => crate::i18n::tr("依 Mac 快捷鍵（⌘C 複製、⌘Tab 切換、單按 ⌥ 開始）"),
         KeyMap::None => crate::i18n::tr("不轉換（對方也是 Mac）"),
+    }
+}
+
+/// GUI label for a gesture habit.
+pub fn habit_label(h: Habit) -> &'static str {
+    match h {
+        Habit::Mac => crate::i18n::tr("依 Mac 手勢（下滑＝所有視窗）"),
+        Habit::Windows => crate::i18n::tr("依 Windows 觸控板（下滑＝顯示桌面）"),
+    }
+}
+
+/// The choice a gesture habit is when picked by hand.
+pub fn chosen(h: Habit) -> GestureMap {
+    match h {
+        Habit::Mac => GestureMap::Mac,
+        Habit::Windows => GestureMap::Windows,
     }
 }
 
@@ -89,6 +109,26 @@ pub fn role() -> Role {
 
 const SHARING_MARK: &str = "sharing-on";
 
+const MONITOR_SKIPS: &str = "monitor-skips";
+
+/// Monitors unticked from a peer's switch button in the tray, as (peer, monitor UUID). A monitor is in the
+/// switch unless it was unticked, so one added later switches too. A file that cannot be read is an error
+/// for the caller to show; a missing one is the empty set.
+pub fn monitor_skips(dir: &std::path::Path) -> std::io::Result<std::collections::BTreeSet<(String, String)>> {
+    let text = match std::fs::read_to_string(dir.join(MONITOR_SKIPS)) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Default::default()),
+        r => r?,
+    };
+    // One `<uuid> <peer>` per line: the peer last, since a name may hold spaces.
+    Ok(text.lines().filter_map(|l| l.split_once(' ')).map(|(u, p)| (p.to_string(), u.to_string())).filter(|(p, u)| !p.is_empty() && !u.is_empty()).collect())
+}
+
+pub fn save_monitor_skips(dir: &std::path::Path, skips: &std::collections::BTreeSet<(String, String)>) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let text: String = skips.iter().map(|(p, u)| format!("{u} {p}\n")).collect();
+    std::fs::write(dir.join(MONITOR_SKIPS), text)
+}
+
 /// Whether sharing was on when it was last switched. A machine that restarts, or an app that was updated,
 /// comes back sharing: a driven machine has nobody at its own keyboard to switch it back on.
 pub fn sharing_remembered(dir: &std::path::Path) -> bool {
@@ -119,7 +159,7 @@ impl UiState {
             peers: c
                 .peers
                 .iter()
-                .map(|p| PeerRow { name: p.name.clone(), addr: p.addr.clone(), edge: p.edge, fingerprint: p.fingerprint.clone(), keys: p.keys })
+                .map(|p| PeerRow { name: p.name.clone(), addr: p.addr.clone(), edge: p.edge, fingerprint: p.fingerprint.clone(), keys: p.keys, gestures: p.gestures, displays: p.displays.clone() })
                 .collect(),
         }
     }
@@ -142,6 +182,8 @@ impl UiState {
                     edge: p.edge,
                     fingerprint: p.fingerprint.clone(),
                     keys: p.keys,
+                    gestures: p.gestures,
+                    displays: p.displays.clone(),
                 })
                 .collect(),
         }
@@ -236,8 +278,8 @@ mod tests {
             listen: "0.0.0.0:24800".into(),
             switch: Switch { dwell_ms: 350, arm_dist: 6, chord: "ctrl+alt+cmd+s".into(), boundary_px: 3 },
             peers: vec![
-                Peer { name: "mini".into(), addr: "192.168.1.20:24800".into(), edge: Edge::Right, fingerprint: "ab".repeat(32), keys: KeyMap::Position },
-                Peer { name: "air".into(), addr: "192.168.1.21:24800".into(), edge: Edge::Left, fingerprint: "cd".repeat(32), keys: KeyMap::Mac },
+                Peer { name: "mini".into(), addr: "192.168.1.20:24800".into(), edge: Edge::Right, fingerprint: "ab".repeat(32), keys: KeyMap::Position, gestures: Default::default(), displays: Vec::new() },
+                Peer { name: "air".into(), addr: "192.168.1.21:24800".into(), edge: Edge::Left, fingerprint: "cd".repeat(32), keys: KeyMap::Mac, gestures: GestureMap::Windows, displays: Vec::new() },
             ],
         }
     }
@@ -245,6 +287,13 @@ mod tests {
     #[test]
     fn config_ui_config_round_trip() {
         let c = sample();
+        assert_eq!(UiState::from_config(&c).to_config(), c);
+    }
+
+    #[test]
+    fn a_save_from_the_window_keeps_the_peer_monitors() {
+        let mut c = sample();
+        c.peers[1].displays = vec![DisplaySwitch { uuid: "U".into(), input: 15, home: 18, verified: true }, DisplaySwitch { uuid: "V".into(), input: 17, home: 19, verified: false }];
         assert_eq!(UiState::from_config(&c).to_config(), c);
     }
 
@@ -340,8 +389,8 @@ mod tests {
         let mut ui = UiState::from_config(&sample());
         ui.peers[1].name = "mini".into();
         ui.peers[1].addr = ui.peers[0].addr.clone();
-        ui.peers.push(PeerRow { name: " ".into(), addr: String::new(), edge: Edge::Top, fingerprint: String::new(), keys: KeyMap::Mac });
-        ui.peers.push(PeerRow { name: String::new(), addr: String::new(), edge: Edge::Bottom, fingerprint: String::new(), keys: KeyMap::Mac });
+        ui.peers.push(PeerRow { name: " ".into(), addr: String::new(), edge: Edge::Top, fingerprint: String::new(), keys: KeyMap::Mac, gestures: Default::default(), displays: Vec::new() });
+        ui.peers.push(PeerRow { name: String::new(), addr: String::new(), edge: Edge::Bottom, fingerprint: String::new(), keys: KeyMap::Mac, gestures: Default::default(), displays: Vec::new() });
         let labels = ui.pairing_labels();
         let distinct: std::collections::BTreeSet<_> = labels.iter().collect();
         assert_eq!(distinct.len(), labels.len(), "{labels:?}");
@@ -377,6 +426,19 @@ mod sharing_tests {
         remember_sharing(&dir, false).unwrap();
         assert!(!sharing_remembered(&dir));
         remember_sharing(&dir, false).unwrap(); // switching off twice is fine
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unticked_monitors_are_remembered_per_peer() {
+        let dir = std::env::temp_dir().join(format!("flowseam-skips-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(monitor_skips(&dir).unwrap().is_empty(), "a fresh install ticks every monitor");
+        let skips: std::collections::BTreeSet<_> = [("my pc".to_string(), "U-1".to_string()), ("air".to_string(), "V".to_string())].into();
+        save_monitor_skips(&dir, &skips).unwrap();
+        assert_eq!(monitor_skips(&dir).unwrap(), skips, "a peer name with a space survives");
+        save_monitor_skips(&dir, &Default::default()).unwrap();
+        assert!(monitor_skips(&dir).unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

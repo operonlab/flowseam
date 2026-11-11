@@ -54,6 +54,8 @@ mod tests {
             edge: CfgEdge::Top,
             fingerprint: "ab".repeat(32),
             keys: Default::default(),
+            gestures: Default::default(),
+            displays: Vec::new(),
         }];
         let t = TapConfig::from_config(&cfg).unwrap();
         assert_eq!(t.edges, vec![Edge::Top]);

@@ -12,7 +12,7 @@ use crate::ifaces::{self, LocalIf};
 use flowseam_core::backend::InputEmitter;
 use flowseam_core::clipboard::ClipboardOs;
 use flowseam_core::forward::Outbox;
-use flowseam_core::proto::{Kind, Msg, PathAddr, MAX_PATH_ADDRS, MIN_PROTO_VERSION, PROTO_VERSION};
+use flowseam_core::proto::{Kind, MonitorId, Msg, PathAddr, MAX_PATH_ADDRS, MIN_PROTO_VERSION, PROTO_VERSION};
 use flowseam_core::status::{self, LinkStatus, PeerStatus};
 use flowseam_net::paths::{path_rank, Candidates, SessionKey};
 use flowseam_net::clipboard::{run_poll, ClipboardPump};
@@ -28,12 +28,17 @@ use std::io;
 use std::path::PathBuf;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{channel, Sender};
+use crossbeam_channel::{unbounded, Receiver as OutReceiver, Sender as OutSender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-type Routes = Arc<Mutex<HashMap<String, (u64, Sender<Msg>, SessionKey, SocketAddr)>>>;
+type Routes = Arc<Mutex<HashMap<String, (u64, OutSender<Msg>, SessionKey, SocketAddr)>>>;
+pub type PeerMonitors = Arc<Mutex<HashMap<String, Option<Vec<MonitorId>>>>>;
+/// Peers whose "back" button asked for their monitors to come home (`Msg::MonitorsHome`), oldest first;
+/// the worker takes them.
+pub type MonitorsHome = Arc<Mutex<Vec<String>>>;
 
 struct PeerPaths { cands: Candidates, speak: u16, attempt: Option<SocketAddr> }
 
@@ -97,6 +102,9 @@ impl Outbox for RouteOutbox {
 pub struct LinkParams {
     pub identity: Identity,
     pub me: PeerInfo,
+    pub monitors: Vec<MonitorId>,
+    pub peer_monitors: PeerMonitors,
+    pub monitors_home: MonitorsHome,
     pub pins: PinSet,
     /// (configured name, dial address, node id = first 16 bytes of the fingerprint)
     pub peers: Vec<(String, SocketAddr, [u8; 16])>,
@@ -172,7 +180,7 @@ impl Links {
                 while !ctx.stop.load(Ordering::SeqCst) {
                     let mut peers: Vec<_> = ctx.board.lock().unwrap_or_else(|e| e.into_inner()).values().cloned().collect();
                     peers.sort_by(|a, b| a.name.cmp(&b.name));
-                    match status::write(&path, &LinkStatus { written_ms: status::now_ms(), peers }) {
+                    match status::write(&path, &LinkStatus { written_ms: status::now_ms(), peers, driven_by: None }) {
                         Ok(()) => {}
                         Err(e) => {
                             let error = e.to_string();
@@ -239,7 +247,7 @@ fn dial_loop<E: InputEmitter + Send + 'static>(ctx: &Arc<Ctx<E>>, i: usize) {
         let lost = {
             let mut routes = ctx.routes.lock().unwrap_or_else(|e| e.into_inner());
             let lost = routes.get(name).and_then(|(gen, _, _, local)| path_lost(local.ip(), &addrs).then_some((*gen, *local)));
-            if let Some((gen, _)) = lost { if routes.get(name).is_some_and(|(g, ..)| *g == gen) { routes.remove(name); mark_down(&ctx.board, name); } }
+            if let Some((gen, _)) = lost { if routes.get(name).is_some_and(|(g, ..)| *g == gen) { routes.remove(name); ctx.p.peer_monitors.lock().unwrap_or_else(|e| e.into_inner()).remove(name); mark_down(&ctx.board, name); } }
             lost
         };
         if let Some((_, local)) = lost {
@@ -296,16 +304,16 @@ fn accept_loop<E: InputEmitter + Send + 'static>(ctx: &Ctx<E>, listener: TcpList
 /// Run one session. `Ok(true)` if it reached Hello and was registered.
 fn session<E: InputEmitter + Send + 'static>(
     ctx: &Ctx<E>,
-    run: impl FnOnce(&Endpoint<'_>, &Receiver<Msg>, &Sender<Msg>, &dyn Fn(&flowseam_net::link::LinkUp)) -> Result<flowseam_net::link::Outcome, NetError>,
+    run: impl FnOnce(&Endpoint<'_>, &OutReceiver<Msg>, &Sender<Msg>, &dyn Fn(&flowseam_net::link::LinkUp)) -> Result<flowseam_net::link::Outcome, NetError>,
 ) -> Result<bool, NetError> {
-    let (out_tx, out_rx) = channel::<Msg>();
+    let (out_tx, out_rx) = unbounded::<Msg>();
     let (in_tx, in_rx) = channel::<Msg>();
     let slot = Mutex::new(Some((out_tx, in_rx)));
     let reg: Mutex<Option<(String, u64)>> = Mutex::new(None);
     let drag_pump: Mutex<Option<Arc<Mutex<DragPump>>>> = Mutex::new(None);
     let speak_for = |node| ctx.p.peers.iter().find(|p| p.2 == node).and_then(|p| ctx.paths.lock().unwrap_or_else(|e| e.into_inner()).get(&p.0).map(|s| s.speak)).unwrap_or(PROTO_VERSION);
     let paths_for = |local: SocketAddr| AdvertisedPaths { kind: ifaces::kind_of_local(&ifaces::local_interfaces(), local.ip()), addrs: ifaces::local_interfaces().into_iter().take(MAX_PATH_ADDRS).map(|i| PathAddr { addr: (i.addr, ctx.p.listen.port()).into(), kind: i.kind }).collect() };
-    let ep = Endpoint { identity: &ctx.p.identity, pins: &ctx.p.pins, me: &ctx.p.me, timing: ctx.p.timing, speak_for: Some(&speak_for), paths_for: Some(&paths_for) };
+    let ep = Endpoint { identity: &ctx.p.identity, pins: &ctx.p.pins, me: &ctx.p.me, monitors: &ctx.p.monitors, timing: ctx.p.timing, speak_for: Some(&speak_for), paths_for: Some(&paths_for) };
     let up = |up: &flowseam_net::link::LinkUp| {
         let Some((out_tx, in_rx)) = slot.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
         let Some((name, ..)) = ctx.p.peers.iter().find(|p| p.2 == up.peer.node) else {
@@ -323,6 +331,7 @@ fn session<E: InputEmitter + Send + 'static>(
                 Reg::New | Reg::Replaced => {
                     let gen = ctx.gens.fetch_add(1, Ordering::SeqCst);
                     routes.insert(name.clone(), (gen, out_tx, key, up.local));
+                    ctx.p.peer_monitors.lock().unwrap_or_else(|e| e.into_inner()).insert(name.clone(), up.monitors.clone());
                     if let Some(peer) = ctx.board.lock().unwrap_or_else(|e| e.into_inner()).get_mut(&name) {
                         peer.up = true;
                         peer.kind = status_kind(ifaces::kind_of_local(&ifaces::local_interfaces(), up.local.ip()), up.paths.as_ref().map(|p| p.kind));
@@ -338,8 +347,21 @@ fn session<E: InputEmitter + Send + 'static>(
         };
         if let Some(paths) = &up.paths { ctx.paths.lock().unwrap_or_else(|e| e.into_inner()).get_mut(&name).expect("configured peer has paths").cands.learn(paths, Instant::now()); }
         if outcome == Reg::Refused { return; }
-        if outcome == Reg::New { ctx.fwd.lock().unwrap_or_else(|e| e.into_inner()).link_up(&name); flowseam_core::log::line(&format!("flowseam: link up with {name}")); }
-        if outcome == Reg::Replaced { flowseam_core::log::line(&format!("flowseam: {name}: path upgraded to {} ({:?})", up.remote, ifaces::kind_of_local(&ifaces::local_interfaces(), up.local.ip()))); }
+        if outcome == Reg::New {
+            let need = {
+                let mut f = ctx.fwd.lock().unwrap_or_else(|e| e.into_inner());
+                f.peer_speaks(&name, up.ver);
+                f.link_up(&name);
+                f.needs_tick()
+            };
+            if need { crate::front::wake_if_idle(); }
+            flowseam_core::log::line(&format!("flowseam: link up with {name}"));
+        }
+        if outcome == Reg::Replaced {
+            // The new session may speak another version: a peer rolled back would drop the link on a Gesture.
+            ctx.fwd.lock().unwrap_or_else(|e| e.into_inner()).peer_speaks(&name, up.ver);
+            flowseam_core::log::line(&format!("flowseam: {name}: path upgraded to {} ({:?})", up.remote, ifaces::kind_of_local(&ifaces::local_interfaces(), up.local.ip())));
+        }
         if up.dialed { let mut paths = ctx.paths.lock().unwrap_or_else(|e| e.into_inner()); if let Some(state) = paths.get_mut(&name) { state.attempt = None; } }
         let gen = reg.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|r| r.1);
         // Sends through the route table (not a held sender), so a replaced or removed route refuses.
@@ -389,6 +411,7 @@ fn session<E: InputEmitter + Send + 'static>(
             });
         }
         let (fwd, clock, on_panic) = (ctx.fwd.clone(), ctx.clock.clone(), ctx.on_panic.clone());
+        let home_asks = ctx.p.monitors_home.clone();
         thread::spawn(move || {
             run_guarded(
                 || {
@@ -406,8 +429,19 @@ fn session<E: InputEmitter + Send + 'static>(
                             }
                             continue;
                         }
+                        if matches!(msg, Msg::MonitorsHome) {
+                            flowseam_core::log::line(&format!("flowseam: {name} asked for its monitors to come home"));
+                            home_asks.lock().unwrap_or_else(|e| e.into_inner()).push(name.clone());
+                            crate::front::wake_if_idle();
+                            continue;
+                        }
                         let now = clock();
-                        fwd.lock().unwrap_or_else(|e| e.into_inner()).on_msg(&name, msg, now);
+                        let need = {
+                            let mut f = fwd.lock().unwrap_or_else(|e| e.into_inner());
+                            f.on_msg(&name, msg, now);
+                            f.needs_tick()
+                        };
+                        if need { crate::front::wake_if_idle(); }
                     }
                 },
                 &*on_panic,
@@ -428,6 +462,7 @@ fn session<E: InputEmitter + Send + 'static>(
         let mut routes = ctx.routes.lock().unwrap_or_else(|e| e.into_inner());
         if routes.get(name).is_some_and(|(g, ..)| g == gen) {
             routes.remove(name);
+            ctx.p.peer_monitors.lock().unwrap_or_else(|e| e.into_inner()).remove(name);
             mark_down(&ctx.board, name);
             drop(routes);
             if link_down_unless_relinked(&*ctx.fwd, &ctx.routes, name, |f| f.link_down(name)) {
@@ -449,7 +484,7 @@ mod tests {
         let routes: Routes = Arc::new(Mutex::new(HashMap::new()));
         let fwd = Mutex::new(Vec::<&str>::new());
         assert!(link_down_unless_relinked(&fwd, &routes, "mbp", |f| f.push("down")));
-        let (tx, _rx) = channel();
+        let (tx, _rx) = unbounded();
         routes.lock().unwrap().insert("mbp".into(), (7, tx, SessionKey::new(2, true), "192.0.2.1:24800".parse().unwrap()));
         assert!(!link_down_unless_relinked(&fwd, &routes, "mbp", |f| f.push("down")));
         assert_eq!(*fwd.lock().unwrap(), ["down"], "the late link_down reached the forwarder");
@@ -514,7 +549,7 @@ mod tests {
         let ifs = vec![LocalIf { name: "bridge0".into(), addr: "169.254.192.119".parse().unwrap(), mask: "255.255.0.0".parse().unwrap(), kind: Kind::Wired },
             LocalIf { name: "en1".into(), addr: "192.0.2.60".parse().unwrap(), mask: "255.255.255.0".parse().unwrap(), kind: Kind::WiFi }];
         let mut up = LinkUp { peer: PeerInfo { node: [0; 16], name: "p".into(), displays: vec![] }, ver: PROTO_VERSION,
-            paths: Some(AdvertisedPaths { kind: Kind::Wired, addrs: vec![] }), local: "169.254.192.119:12".parse().unwrap(), remote: "169.254.1.2:13".parse().unwrap(), dialed: true };
+            paths: Some(AdvertisedPaths { kind: Kind::Wired, addrs: vec![] }), monitors: None, local: "169.254.192.119:12".parse().unwrap(), remote: "169.254.1.2:13".parse().unwrap(), dialed: true };
         assert_eq!(key_for(&up, &ifs, true), SessionKey::new(0, true));
         assert_eq!(key_for(&up, &ifs, false), SessionKey::new(0, false));
         up.paths.as_mut().unwrap().kind = Kind::WiFi;
@@ -543,6 +578,8 @@ mod tests {
     struct Node {
         fwd: Shared<NullEm, RouteOutbox>,
         links: Links,
+        routes: RouteOutbox,
+        home_asks: MonitorsHome,
         _log: Log,
     }
 
@@ -571,7 +608,7 @@ mod tests {
         let log = Log::default();
         let os = MockOs { log: log.clone(), preflight: Preflight::Missing(Permission::Accessibility), secure: Ok(Some(false)), fail_show: false };
         let guard = GrabGuard::new(Box::new(os), std::env::temp_dir().join(format!("flowseam-mac-links-{name}-{}.lock", std::process::id())));
-        let cfg = FwdConfig { peers: vec![PeerSpec { name: other_name.into(), edge, keys: flowseam_core::config::KeyMap::None }], policy: SwitchPolicy::default(), boundary_px: 2 };
+        let cfg = FwdConfig { peers: vec![PeerSpec { name: other_name.into(), edge, keys: flowseam_core::config::KeyMap::None, gestures: Default::default() }], policy: SwitchPolicy::default(), boundary_px: 2 };
         let mut sink = EmitSink::new(NullEm, guard);
         if let Some(d) = &drags {
             sink = sink.with_drags(d.hub.clone(), Box::new(|_| {}));
@@ -583,16 +620,20 @@ mod tests {
         let params = LinkParams {
             identity: id.clone(),
             me: PeerInfo { node: node_id, name: name.into(), displays: vec![screen] },
+            monitors: vec![],
+            peer_monitors: PeerMonitors::default(),
+            monitors_home: MonitorsHome::default(),
             pins: PinSet::new([other_fp]),
             peers: vec![(other_name.into(), dial, other_node)],
             listen: "127.0.0.1:0".parse().unwrap(),
             timing: timing(),
             status: None,
         };
+        let home_asks = params.monitors_home.clone();
         let t0 = Instant::now();
         let clock: Clock = Arc::new(move || t0.elapsed().as_millis() as u64);
-        let links = Links::start(params, fwd.clone(), routes, clock, Arc::new(|| {}), clip, drags).unwrap();
-        Node { fwd, links, _log: log }
+        let links = Links::start(params, fwd.clone(), routes.clone(), clock, Arc::new(|| {}), clip, drags).unwrap();
+        Node { fwd, links, routes, home_asks, _log: log }
     }
 
     fn wait(secs: u64, mut f: impl FnMut() -> bool) -> bool {
@@ -650,6 +691,20 @@ mod tests {
         cb.copy("from b");
         assert!(wait(5, || ca.text().as_deref() == Some("from b")), "B -> A did not arrive after a failed write");
         assert_eq!(a.routes_len(), 1, "link survived the failed write");
+        a.links.stop();
+        b.links.stop();
+    }
+
+    /// The driven side's "back" reaches the controller as a request for its monitors, over real pinned TLS.
+    #[test]
+    fn a_peers_back_button_reaches_the_worker_as_a_monitor_return() {
+        let (a_id, b_id) = (Identity::generate().unwrap(), Identity::generate().unwrap());
+        let b = node("b", &b_id, &a_id, "a", Edge::Left, "127.0.0.1:1".parse().unwrap());
+        let a = node("a", &a_id, &b_id, "b", Edge::Right, b.links.wake);
+        assert!(wait(8, || a.routes_len() == 1 && b.routes_len() == 1), "link never came up");
+        b.routes.clone().send("a", Msg::MonitorsHome);
+        assert!(wait(5, || *a.home_asks.lock().unwrap() == ["b"]), "the request never reached A");
+        assert!(b.home_asks.lock().unwrap().is_empty());
         a.links.stop();
         b.links.stop();
     }

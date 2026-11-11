@@ -6,9 +6,16 @@
 
 use serde::{Deserialize, Serialize};
 
-/// 2: file drags (`DragBegin`, `FileChunk`, `DragAck`, `DragCancel`). 3: `DragSoon`.
-pub const PROTO_VERSION: u16 = 4;
+/// 2: file drags (`DragBegin`, `FileChunk`, `DragAck`, `DragCancel`). 3: `DragSoon`. 4: `Paths`. 5: `Monitors`.
+/// 6: `MonitorsHome`. 7: `Gesture`. 8: `EnterCentered`. 9: `EnterCenteredClosed`.
+pub const PROTO_VERSION: u16 = 9;
 pub const MIN_PROTO_VERSION: u16 = 3;
+/// The first version that decodes `Msg::Gesture`. An older peer drops the link on a message it cannot decode.
+pub const GESTURE_PROTO_VERSION: u16 = 7;
+/// The first version that decodes `Msg::EnterCentered`; an older peer gets a plain `Enter`.
+pub const CENTERED_PROTO_VERSION: u16 = 8;
+/// The first version that decodes `Msg::EnterCenteredClosed`; an older peer gets `EnterCentered`, its edge back open.
+pub const CLOSED_PROTO_VERSION: u16 = 9;
 pub const MAX_PATH_ADDRS: usize = 16;
 pub const MAX_NAME_BYTES: usize = 64;
 pub const MAX_DISPLAYS: usize = 16;
@@ -45,6 +52,25 @@ impl Kind {
 pub struct PathAddr {
     pub addr: std::net::SocketAddr,
     pub kind: Kind,
+}
+
+/// EDID manufacturer id (bytes 8-9, big-endian), product code (bytes 10-11, little-endian), serial (bytes 12-15, little-endian).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MonitorId {
+    pub vendor: u16,
+    pub product: u16,
+    pub serial: u32,
+}
+
+pub fn parse_edid(edid: &[u8]) -> Option<MonitorId> {
+    if edid.len() < 128 || edid[..8] != [0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00] {
+        return None;
+    }
+    Some(MonitorId {
+        vendor: u16::from_be_bytes([edid[8], edid[9]]),
+        product: u16::from_le_bytes([edid[10], edid[11]]),
+        serial: u32::from_le_bytes(edid[12..16].try_into().ok()?),
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -98,6 +124,30 @@ pub enum Reason {
     UserEscape,
     /// The recipient of an `Enter` is driving or being driven by another machine and cannot take it.
     Busy,
+}
+
+/// Most zoom steps one `Gesture::Zoom` carries. A pinch sends a step at a time; this only bounds a forged one.
+pub const MAX_ZOOM_STEPS: i8 = 16;
+
+/// A trackpad gesture by what it means, as the controller's Mac recognized it. Sent as itself only to a
+/// Mac that speaks protocol 5; any other peer gets the gesture's shortcut as keys (`gesture`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Gesture {
+    /// Pinch, in steps: positive zooms in, negative out. Never 0.
+    Zoom(i8),
+    /// Two-finger double tap.
+    SmartZoom,
+    /// The space or virtual desktop to the left or right.
+    SpaceLeft,
+    SpaceRight,
+    /// Swipe up: Mission Control, Task View.
+    Overview,
+    /// Swipe down: App Exposé.
+    AppWindows,
+    /// Thumb and three fingers spread apart.
+    ShowDesktop,
+    /// Thumb and three fingers pinched together: Apps, Start.
+    Launcher,
 }
 
 /// One file of a drag: its bare name (no directories) and exact length.
@@ -220,6 +270,37 @@ pub enum Msg {
         kind: Kind,
         addrs: Vec<PathAddr>,
     },
+    /// Handshake, protocol 5 on: the monitors this machine is attached to.
+    Monitors { list: Vec<MonitorId> },
+    /// Protocol 6 on, from a driven machine's "back" button: send home the monitors you switch for me,
+    /// whether or not you are driving me now (one may have switched by itself while you were down).
+    MonitorsHome,
+    /// Protocol 7. After every older variant on purpose: postcard numbers variants by position.
+    Gesture {
+        seq: u32,
+        gesture: Gesture,
+    },
+    /// Protocol 8. An `Enter` that did not come through an edge (the menu, the chord): the cursor appears
+    /// in the middle of the display that `edge` and `frac` point at, not next to `edge`, which is still
+    /// the way back. Landing a few pixels from the way back, the first move toward it would end the session.
+    EnterCentered {
+        seq: u32,
+        edge: Edge,
+        frac: u16,
+        mods: ModifierSet,
+        pressed: Vec<u16>,
+    },
+    /// Protocol 9. An `EnterCentered` whose way back stays closed for the whole session: every display of
+    /// the sender shows the recipient now, so the edge toward the sender leads to nothing anyone can see,
+    /// and a cursor that strays onto it would only send the monitors home. The sender's chord, the
+    /// recipient's menu or the emergency chord still end the session.
+    EnterCenteredClosed {
+        seq: u32,
+        edge: Edge,
+        frac: u16,
+        mods: ModifierSet,
+        pressed: Vec<u16>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -245,7 +326,10 @@ pub fn validate(m: &Msg) -> Result<(), ProtoError> {
             }
             Ok(())
         }
-        Msg::Enter { mods, pressed, .. } | Msg::ModSync { mods, pressed, .. } => {
+        Msg::Enter { mods, pressed, .. }
+        | Msg::EnterCentered { mods, pressed, .. }
+        | Msg::EnterCenteredClosed { mods, pressed, .. }
+        | Msg::ModSync { mods, pressed, .. } => {
             check_mods(*mods)?;
             check_pressed(pressed)
         }
@@ -282,6 +366,12 @@ pub fn validate(m: &Msg) -> Result<(), ProtoError> {
         }
         Msg::Paths { addrs, .. } if addrs.len() > MAX_PATH_ADDRS => {
             Err(ProtoError::Invalid("more than 16 path addresses"))
+        }
+        Msg::Monitors { list } if list.len() > MAX_DISPLAYS => {
+            Err(ProtoError::Invalid("more than 16 monitors"))
+        }
+        Msg::Gesture { gesture: Gesture::Zoom(steps), .. } if *steps == 0 || steps.unsigned_abs() > MAX_ZOOM_STEPS as u8 => {
+            Err(ProtoError::Invalid("zoom steps 0 or over 16"))
         }
         _ => Ok(()),
     }
@@ -375,6 +465,12 @@ mod tests {
                     kind: Kind::WiFi,
                 }],
             },
+            Msg::Monitors { list: vec![MonitorId { vendor: 0x09d1, product: 0x7955, serial: 0x1234 }] },
+            Msg::MonitorsHome,
+            Msg::Gesture { seq: 8, gesture: Gesture::Zoom(-3) },
+            Msg::Gesture { seq: 9, gesture: Gesture::Launcher },
+            Msg::EnterCentered { seq: 10, edge: Edge::Left, frac: 0, mods: ModifierSet(ModifierSet::GUI), pressed: vec![0xE3] },
+            Msg::EnterCenteredClosed { seq: 11, edge: Edge::Right, frac: 65535, mods: ModifierSet(ModifierSet::SHIFT), pressed: vec![0xE1] },
         ]
     }
 
@@ -383,7 +479,7 @@ mod tests {
         let all = fixtures();
         // Exhaustive match: adding a variant without a fixture fails to compile
         // or leaves its index unseen below.
-        let mut seen = [false; 23];
+        let mut seen = [false; 28];
         for m in &all {
             let i = match m {
                 Msg::Hello { .. } => 0,
@@ -409,10 +505,15 @@ mod tests {
                 Msg::DragCancel { .. } => 20,
                 Msg::DragSoon { .. } => 21,
                 Msg::Paths { .. } => 22,
+                Msg::Monitors { .. } => 23,
+                Msg::MonitorsHome => 24,
+                Msg::Gesture { .. } => 25,
+                Msg::EnterCentered { .. } => 26,
+                Msg::EnterCenteredClosed { .. } => 27,
             };
             seen[i] = true;
         }
-        assert!(seen.iter().all(|&s| s), "every one of the 23 variants needs a fixture");
+        assert!(seen.iter().all(|&s| s), "every one of the 28 variants needs a fixture");
         for m in all {
             let bytes = encode(&m).expect("encode");
             let back = decode(&bytes).expect("decode");
@@ -435,6 +536,27 @@ mod tests {
         let mut bytes = encode(&Msg::Ping { t: 5 }).unwrap();
         bytes.push(0);
         assert_eq!(decode(&bytes), Err(ProtoError::TrailingBytes(1)));
+    }
+
+    #[test]
+    fn parse_edid_identity() {
+        let mut edid = [0; 128];
+        edid[..16].copy_from_slice(&[0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x09, 0xd1, 0x55, 0x79, 0x34, 0x12, 0x00, 0x00]);
+        assert_eq!(parse_edid(&edid), Some(MonitorId { vendor: 0x09d1, product: 0x7955, serial: 0x1234 }));
+        edid[0] = 1;
+        assert_eq!(parse_edid(&edid), None);
+        edid[0] = 0;
+        assert_eq!(parse_edid(&edid[..127]), None);
+    }
+
+    #[test]
+    fn monitor_count_limit_applies_on_decode() {
+        let id = MonitorId { vendor: 1, product: 2, serial: 3 };
+        let at_limit = Msg::Monitors { list: vec![id; 16] };
+        assert_eq!(decode(&encode(&at_limit).unwrap()), Ok(at_limit));
+        let too_many = Msg::Monitors { list: vec![id; 17] };
+        assert_eq!(encode(&too_many), Err(ProtoError::Invalid("more than 16 monitors")));
+        assert_eq!(decode(&postcard::to_allocvec(&too_many).unwrap()), Err(ProtoError::Invalid("more than 16 monitors")));
     }
 
     #[test]
@@ -511,6 +633,30 @@ mod tests {
     }
 
     #[test]
+    fn existing_variants_keep_their_wire_numbers() {
+        // Older peers decode these; a variant inserted before them would renumber them all.
+        assert_eq!(encode(&Msg::Paths { kind: Kind::Wired, addrs: vec![] }).unwrap()[0], 22);
+        assert_eq!(encode(&Msg::MonitorsHome).unwrap()[0], 24);
+        assert_eq!(encode(&Msg::Gesture { seq: 0, gesture: Gesture::SmartZoom }).unwrap()[0], 25);
+        let centered = Msg::EnterCentered { seq: 0, edge: Edge::Left, frac: 0, mods: ModifierSet(0), pressed: vec![] };
+        assert_eq!(encode(&centered).unwrap()[0], 26);
+        let closed = Msg::EnterCenteredClosed { seq: 0, edge: Edge::Left, frac: 0, mods: ModifierSet(0), pressed: vec![] };
+        assert_eq!(encode(&closed).unwrap()[0], 27);
+    }
+
+    #[test]
+    fn zoom_steps_are_bounded_at_both_ends() {
+        for bad in [0, MAX_ZOOM_STEPS + 1, -MAX_ZOOM_STEPS - 1, i8::MIN] {
+            let m = Msg::Gesture { seq: 0, gesture: Gesture::Zoom(bad) };
+            assert!(matches!(encode(&m), Err(ProtoError::Invalid(_))), "{bad} encoded");
+            assert!(decode(&postcard::to_allocvec(&m).unwrap()).is_err(), "{bad} decoded");
+        }
+        for ok in [1, -1, MAX_ZOOM_STEPS, -MAX_ZOOM_STEPS] {
+            assert!(encode(&Msg::Gesture { seq: 0, gesture: Gesture::Zoom(ok) }).is_ok(), "{ok} refused");
+        }
+    }
+
+    #[test]
     fn hid_outside_key_set_is_rejected() {
         assert!(encode(&Msg::Key { seq: 0, hid: 256, down: true, repeat: false }).is_err());
         assert!(encode(&Msg::Key { seq: 0, hid: 255, down: true, repeat: false }).is_ok());
@@ -522,6 +668,14 @@ mod tests {
             pressed: vec![300],
         };
         assert!(encode(&bad_enter).is_err());
+        let bad_centered = Msg::EnterCentered { seq: 0, edge: Edge::Left, frac: 0, mods: ModifierSet(0), pressed: vec![300] };
+        assert!(encode(&bad_centered).is_err());
+        assert!(decode(&postcard::to_allocvec(&bad_centered).unwrap()).is_err());
+        let bad_closed = Msg::EnterCenteredClosed { seq: 0, edge: Edge::Left, frac: 0, mods: ModifierSet(0x80), pressed: vec![] };
+        assert!(encode(&bad_closed).is_err());
+        assert!(decode(&postcard::to_allocvec(&bad_closed).unwrap()).is_err());
+        let bad_closed_key = Msg::EnterCenteredClosed { seq: 0, edge: Edge::Left, frac: 0, mods: ModifierSet(0), pressed: vec![300] };
+        assert!(decode(&postcard::to_allocvec(&bad_closed_key).unwrap()).is_err());
     }
 
     #[test]

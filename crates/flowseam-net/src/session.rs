@@ -13,14 +13,19 @@
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
+use std::net::Shutdown;
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::sync::{Mutex, MutexGuard};
+#[cfg(test)]
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use flowseam_core::framing::{encode_frame, FrameDecoder};
-use flowseam_core::proto::{self, Kind, Msg, PathAddr, Rect, MIN_PROTO_VERSION, PROTO_VERSION};
+use flowseam_core::proto::{self, Kind, MonitorId, Msg, PathAddr, Rect, MIN_PROTO_VERSION, PROTO_VERSION};
 use rustls::{ClientConnection, ServerConnection, StreamOwned};
 
 use crate::NetError;
@@ -54,10 +59,6 @@ fn plaintext_pending(st: Result<rustls::IoState, rustls::Error>) -> bool {
     st.map_or(true, |s| s.plaintext_bytes_to_read() > 0)
 }
 
-/// How often each evented thread looks up from its wait to check whether the session has ended.
-/// Bounds how long a peer-side end takes to reach the caller, and how long shutdown joins take.
-const STOP_CHECK: Duration = Duration::from_millis(50);
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerInfo {
     pub node: [u8; 16],
@@ -74,12 +75,14 @@ pub struct PeerPaths {
 pub struct GreetOpts {
     pub speak: u16,
     pub paths: PeerPaths,
+    pub monitors: Vec<MonitorId>,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Greeting {
     pub peer: PeerInfo,
     pub ver: u16,
     pub paths: Option<PeerPaths>,
+    pub monitors: Option<Vec<MonitorId>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,6 +170,7 @@ impl<S: Read + Write> Channel<S> {
                     kind: Kind::Other,
                     addrs: vec![],
                 },
+                monitors: vec![],
             },
             timeout,
             cert_node,
@@ -263,7 +267,16 @@ impl<S: Read + Write> Channel<S> {
         } else {
             None
         };
-        Ok(Greeting { peer, ver, paths })
+        let monitors = if ver >= 5 {
+            self.send(&Msg::Monitors { list: opts.monitors.clone() })?;
+            match self.next_msg(deadline)? {
+                Msg::Monitors { list } => Some(list),
+                other => return Err(NetError::Proto(format!("expected Monitors, got {other:?}"))),
+            }
+        } else {
+            None
+        };
+        Ok(Greeting { peer, ver, paths, monitors })
     }
 
     pub(crate) fn next_msg(&mut self, deadline: Instant) -> Result<Msg, NetError> {
@@ -384,6 +397,14 @@ struct Shared {
     done: AtomicBool,
     end: Mutex<Option<End>>,
     last_seen: Mutex<Instant>,
+    #[cfg(test)]
+    turns: Option<Arc<LoopTurns>>,
+}
+
+#[cfg(test)]
+struct LoopTurns {
+    read: std::sync::atomic::AtomicUsize,
+    send: std::sync::atomic::AtomicUsize,
 }
 
 impl Shared {
@@ -409,12 +430,22 @@ impl<S: Read + Write + Buffered + Send> Channel<S> {
     /// Like [`Channel::run`], but the caller's thread never blocks in a read. A reader thread waits for
     /// `probe` (a clone of the underlying socket, sharing its read timeout) to turn readable and then reads
     /// under a short lock; this thread waits on `outgoing` and sends the moment a message is queued.
-    pub fn run_evented(&mut self, outgoing: &Receiver<Msg>, incoming: &Sender<Msg>, timing: Timing, probe: TcpStream) -> End {
-        let shared = Shared { done: AtomicBool::new(false), end: Mutex::new(None), last_seen: Mutex::new(Instant::now()) };
+    pub fn run_evented(&mut self, outgoing: &crossbeam_channel::Receiver<Msg>, incoming: &Sender<Msg>, timing: Timing, probe: TcpStream) -> End {
+        self.run_evented_inner(outgoing, incoming, timing, probe, #[cfg(test)] None)
+    }
+
+    fn run_evented_inner(&mut self, outgoing: &crossbeam_channel::Receiver<Msg>, incoming: &Sender<Msg>, timing: Timing, probe: TcpStream, #[cfg(test)] turns: Option<Arc<LoopTurns>>) -> End {
+        let shared = Shared { done: AtomicBool::new(false), end: Mutex::new(None), last_seen: Mutex::new(Instant::now()), #[cfg(test)] turns };
         let ch = Mutex::new(self);
+        let (stop_tx, stop_rx) = crossbeam_channel::bounded(1);
         thread::scope(|s| {
-            s.spawn(|| read_loop(&ch, &probe, incoming, &shared));
-            send_loop(&ch, outgoing, timing, &shared);
+            s.spawn(|| {
+                read_loop(&ch, &probe, incoming, &shared);
+                let _ = stop_tx.send(());
+            });
+            send_loop(&ch, outgoing, &stop_rx, timing, &shared);
+            // The probe shares the socket: shutdown wakes a blocked readability wait at once.
+            let _ = probe.shutdown(Shutdown::Read);
         });
         let end = shared.end.into_inner().unwrap_or_else(|p| p.into_inner());
         end.unwrap_or(End::LocalClosed)
@@ -426,18 +457,38 @@ fn lock<'a, 'b, S>(ch: &'a Mutex<&'b mut Channel<S>>) -> MutexGuard<'a, &'b mut 
 }
 
 /// Wait for the socket to turn readable, then read everything available, the stream's buffered
-/// plaintext included, and deliver it. The probe's read timeout bounds each wait so a session that the
-/// sender ended is noticed.
+/// plaintext included, and deliver it. poll blocks despite the TLS stream's short read timeout.
 fn read_loop<S: Read + Write + Buffered>(ch: &Mutex<&mut Channel<S>>, probe: &TcpStream, incoming: &Sender<Msg>, sh: &Shared) {
     let mut one = [0u8; 1];
     while !sh.is_done() {
-        match probe.peek(&mut one) {
-            Ok(_) => {} // data, or EOF (0): the read reports which
-            Err(e) if is_idle(&e) => continue,
-            Err(_) => {} // let the read surface the error
+        #[cfg(test)]
+        if let Some(turns) = &sh.turns { turns.read.fetch_add(1, Ordering::SeqCst); }
+        // A read takes in whatever has arrived, the handshake's reads included: messages can already be
+        // decoded, or plaintext held by the TLS layer. The socket will not turn readable for them.
+        let pending = {
+            let mut g = lock(ch);
+            !g.queued.is_empty() || g.fault.is_some() || g.stream.has_buffered()
+        };
+        if !pending {
+            #[cfg(unix)]
+            {
+                let mut fd = libc::pollfd { fd: probe.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+                // SAFETY: `fd` holds the live probe descriptor for this scoped reader.
+                if unsafe { libc::poll(&mut fd, 1, -1) } < 0 {
+                    let e = io::Error::last_os_error();
+                    if e.kind() == io::ErrorKind::Interrupted { continue; }
+                    return sh.finish(End::Io(e));
+                }
+            }
+            if sh.is_done() { return; }
+            match probe.peek(&mut one) {
+                Ok(_) => {} // data, or EOF (0): the read reports which
+                Err(e) if is_idle(&e) => continue,
+                Err(_) => {} // let the read surface the error
+            }
         }
         let mut g = lock(ch);
-        let mut read = g.read_some();
+        let mut read = if pending { Ok(()) } else { g.read_some() };
         while read.is_ok() && g.stream.has_buffered() {
             read = g.read_some();
         }
@@ -458,12 +509,19 @@ fn read_loop<S: Read + Write + Buffered>(ch: &Mutex<&mut Channel<S>>, probe: &Tc
 }
 
 /// Send each queued message at once, and the heartbeat when due; end the session on a dead peer.
-fn send_loop<S: Read + Write>(ch: &Mutex<&mut Channel<S>>, outgoing: &Receiver<Msg>, timing: Timing, sh: &Shared) {
+fn send_loop<S: Read + Write>(ch: &Mutex<&mut Channel<S>>, outgoing: &crossbeam_channel::Receiver<Msg>, stop: &crossbeam_channel::Receiver<()>, timing: Timing, sh: &Shared) {
     let mut last_ping = Instant::now();
     while !sh.is_done() {
+        #[cfg(test)]
+        if let Some(turns) = &sh.turns { turns.send.fetch_add(1, Ordering::SeqCst); }
         let until_ping = timing.ping_every.saturating_sub(last_ping.elapsed());
-        match outgoing.recv_timeout(until_ping.min(STOP_CHECK)) {
+        let until_dead = timing.dead_after.saturating_sub(sh.since_seen());
+        // Select the reader's private wake with outgoing data so no stop timer delays either.
+        crossbeam_channel::select! {
+            recv(stop) -> _ => return,
+            recv(outgoing) -> result => match result {
             Ok(m) => {
+                if sh.is_done() { return; }
                 let mut g = lock(ch);
                 let mut next = Some(m);
                 // A burst (a fast mouse) goes out under one lock.
@@ -474,9 +532,11 @@ fn send_loop<S: Read + Write>(ch: &Mutex<&mut Channel<S>>, outgoing: &Receiver<M
                     next = outgoing.try_recv().ok();
                 }
             }
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => return sh.finish(End::LocalClosed),
+            Err(_) => return sh.finish(End::LocalClosed),
+            },
+            default(until_ping.min(until_dead)) => {}
         }
+        if sh.is_done() { return; }
         if last_ping.elapsed() >= timing.ping_every {
             if let Err(e) = lock(ch).send(&Msg::Ping { t: now_millis() }) {
                 return sh.finish(send_end(e));
@@ -599,6 +659,97 @@ mod tests {
         (client, server)
     }
 
+    fn production_like() -> Timing {
+        Timing { ping_every: Duration::from_secs(1), dead_after: Duration::from_secs(3), handshake_timeout: Duration::from_secs(2) }
+    }
+
+    // ponytail: unix only, the Windows reader still wakes on the socket read timeout; WSAPoll in read_loop would make it evented there too.
+    #[cfg(unix)]
+    #[test]
+    fn evented_idle_waits_for_ping_instead_of_polling() {
+        let (a, b) = pair();
+        let probe_a = a.try_clone().unwrap();
+        let probe_b = b.try_clone().unwrap();
+        let (tx_a, rx_a) = crossbeam_channel::unbounded();
+        let (tx_b, rx_b) = crossbeam_channel::unbounded();
+        let (in_a, _out_a) = channel();
+        let (in_b, _out_b) = channel();
+        let counts_a = Arc::new(LoopTurns { read: 0.into(), send: 0.into() });
+        let counts_b = Arc::new(LoopTurns { read: 0.into(), send: 0.into() });
+        let seen_a = counts_a.clone();
+        let seen_b = counts_b.clone();
+        let ta = thread::spawn(move || Channel::new(a).run_evented_inner(&rx_a, &in_a, production_like(), probe_a, Some(counts_a)));
+        let tb = thread::spawn(move || Channel::new(b).run_evented_inner(&rx_b, &in_b, production_like(), probe_b, Some(counts_b)));
+        thread::sleep(Duration::from_secs(2));
+        for counts in [&seen_a, &seen_b] {
+            assert!(counts.read.load(Ordering::SeqCst) <= 4, "idle read loop polled");
+            assert!(counts.send.load(Ordering::SeqCst) <= 4, "idle send loop polled");
+        }
+        drop(tx_a);
+        drop(tx_b);
+        assert!(matches!(ta.join().unwrap(), End::LocalClosed | End::PeerClosed));
+        assert!(matches!(tb.join().unwrap(), End::LocalClosed | End::PeerClosed));
+    }
+
+    #[test]
+    fn evented_peer_eof_wakes_sender_promptly() {
+        let (a, b) = pair();
+        let probe = a.try_clone().unwrap();
+        let (_tx, rx) = crossbeam_channel::unbounded();
+        let (incoming, _received) = channel();
+        let (done_tx, done_rx) = channel();
+        let thread = thread::spawn(move || done_tx.send(Channel::new(a).run_evented(&rx, &incoming, production_like(), probe)).unwrap());
+        let start = Instant::now();
+        drop(b);
+        assert!(matches!(done_rx.recv_timeout(Duration::from_millis(100)).unwrap(), End::PeerClosed));
+        assert!(start.elapsed() < Duration::from_millis(100));
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn evented_local_close_and_queued_message_are_prompt() {
+        let (a, b) = pair();
+        let probe = a.try_clone().unwrap();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let (incoming, _received) = channel();
+        let (done_tx, done_rx) = channel();
+        let thread = thread::spawn(move || done_tx.send(Channel::new(a).run_evented(&rx, &incoming, production_like(), probe)).unwrap());
+        let mut peer = Channel::new(b);
+        let start = Instant::now();
+        tx.send(Msg::ClipboardText { gen: 1, text: "now".into() }).unwrap();
+        assert!(matches!(peer.next_msg(Instant::now() + Duration::from_millis(100)).unwrap(), Msg::ClipboardText { text, .. } if text == "now"));
+        assert!(start.elapsed() < Duration::from_millis(100));
+        let start = Instant::now();
+        drop(tx);
+        assert!(matches!(done_rx.recv_timeout(Duration::from_millis(100)).unwrap(), End::LocalClosed));
+        assert!(start.elapsed() < Duration::from_millis(100));
+        thread.join().unwrap();
+    }
+
+    /// The handshake reads with `next_msg`, and one read takes in whatever has arrived: the peer's first
+    /// message after the handshake can already be decoded and waiting. The socket will not turn readable
+    /// for it, so the evented reader must hand it on without waiting for the next packet.
+    #[test]
+    fn evented_delivers_what_the_handshake_already_read() {
+        let (a, b) = pair();
+        let probe = a.try_clone().unwrap();
+        let mut peer = Channel::new(b);
+        peer.send(&Msg::ClipboardText { gen: 1, text: "handshake".into() }).unwrap();
+        peer.send(&Msg::ClipboardText { gen: 2, text: "first input".into() }).unwrap();
+        thread::sleep(Duration::from_millis(50));
+        let mut ch = Channel::new(a);
+        assert!(matches!(ch.next_msg(Instant::now() + Duration::from_millis(500)).unwrap(), Msg::ClipboardText { gen: 1, .. }));
+        assert_eq!(ch.queued.len(), 1, "the setup must leave the second message decoded and waiting");
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let (incoming, received) = channel();
+        let thread = thread::spawn(move || ch.run_evented(&rx, &incoming, production_like(), probe));
+        let got = received.recv_timeout(Duration::from_millis(300));
+        drop(tx);
+        thread.join().unwrap();
+        drop(peer);
+        assert!(matches!(got, Ok(Msg::ClipboardText { gen: 2, .. })), "the message read during the handshake waited for the next packet: {got:?}");
+    }
+
     fn info(name: &str, b: u8) -> PeerInfo {
         PeerInfo {
             node: [b; 16],
@@ -669,6 +820,7 @@ mod tests {
     fn opts(speak: u16, kind: Kind, port: u16) -> GreetOpts {
         GreetOpts {
             speak,
+            monitors: vec![],
             paths: PeerPaths {
                 kind,
                 addrs: vec![PathAddr {
@@ -694,6 +846,34 @@ mod tests {
         let gb = t.join().unwrap().unwrap();
         assert_eq!((ga.ver, ga.paths), (4, Some(expected_b)));
         assert_eq!((gb.ver, gb.paths), (4, Some(expected_a)));
+    }
+
+    #[test]
+    fn v5_exchanges_monitors_both_ways() {
+        let (a, b) = pair();
+        let (ia, ib) = (info("mac", 1), info("win", 2));
+        let mut oa = opts(5, Kind::Wired, 1);
+        let mut ob = opts(5, Kind::WiFi, 2);
+        oa.monitors = vec![MonitorId { vendor: 1, product: 2, serial: 3 }];
+        ob.monitors = vec![MonitorId { vendor: 4, product: 5, serial: 6 }];
+        let expected_a = oa.monitors.clone();
+        let expected_b = ob.monitors.clone();
+        let t = thread::spawn(move || Channel::new(b).greet(&ib, &ob, Duration::from_secs(2), None));
+        let ga = Channel::new(a).greet(&ia, &oa, Duration::from_secs(2), None).unwrap();
+        let gb = t.join().unwrap().unwrap();
+        assert_eq!((ga.ver, ga.monitors), (5, Some(expected_b)));
+        assert_eq!((gb.ver, gb.monitors), (5, Some(expected_a)));
+    }
+
+    #[test]
+    fn v5_to_v4_skips_monitors() {
+        let (a, b) = pair();
+        let t = thread::spawn(move || Channel::new(b).greet(&info("old", 2), &opts(4, Kind::Other, 2), Duration::from_secs(2), None));
+        let ga = Channel::new(a).greet(&info("new", 1), &opts(5, Kind::Other, 1), Duration::from_secs(2), None).unwrap();
+        let gb = t.join().unwrap().unwrap();
+        assert_eq!((ga.ver, ga.monitors), (4, None));
+        assert_eq!((gb.ver, gb.monitors), (4, None));
+        assert!(ga.paths.is_some() && gb.paths.is_some());
     }
 
     #[test]

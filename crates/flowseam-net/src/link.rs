@@ -8,11 +8,12 @@ use std::io;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::ops::DerefMut;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::Sender;
+use crossbeam_channel::Receiver;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use flowseam_core::proto::{Kind, Msg, PROTO_VERSION};
+use flowseam_core::proto::{Kind, MonitorId, Msg, PROTO_VERSION};
 use rustls::pki_types::ServerName;
 use rustls::{ClientConnection, ConnectionCommon, ServerConnection, StreamOwned};
 
@@ -38,6 +39,7 @@ pub struct Endpoint<'a> {
     pub identity: &'a Identity,
     pub pins: &'a PinSet,
     pub me: &'a PeerInfo,
+    pub monitors: &'a [MonitorId],
     pub timing: Timing,
     pub speak_for: Option<&'a (dyn Fn([u8; 16]) -> u16 + Sync)>,
     pub paths_for: Option<&'a (dyn Fn(SocketAddr) -> PeerPaths + Sync)>,
@@ -48,6 +50,7 @@ pub struct LinkUp {
     pub peer: PeerInfo,
     pub ver: u16,
     pub paths: Option<PeerPaths>,
+    pub monitors: Option<Vec<MonitorId>>,
     pub local: SocketAddr,
     pub remote: SocketAddr,
     pub dialed: bool,
@@ -185,6 +188,7 @@ where
     let mut ch = Channel::new(stream);
     let opts = GreetOpts {
         speak: ep.speak_for.map_or(PROTO_VERSION, |f| f(cert_node)),
+        monitors: ep.monitors.to_vec(),
         paths: ep.paths_for.map_or(
             PeerPaths {
                 kind: Kind::Other,
@@ -199,6 +203,7 @@ where
         peer: peer.clone(),
         ver: greeting.ver,
         paths: greeting.paths,
+        monitors: greeting.monitors,
         local: probe.local,
         remote: probe.remote,
         dialed: probe.dialed,
