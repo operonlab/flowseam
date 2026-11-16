@@ -86,8 +86,27 @@ pub fn wire_button(b: u8) -> Option<WinButton> {
 
 pub use flowseam_core::geometry::clamp_to_displays;
 
-/// flowseam_core's sink for a machine being driven: everything a peer sends is injected through `I`.
-/// This machine never captures, so the controller-only calls (grab, hide, show) are reported as bugs.
+/// What a controller does with its own cursor while it drives a peer. The hooks swallow the moves, so the
+/// cursor stays where it is put.
+pub trait Grab: Send {
+    /// Put the cursor at `at` without a move the hooks would see.
+    fn park(&mut self, at: Point) -> Result<(), String>;
+    fn hide(&mut self) -> Result<(), String>;
+    fn show(&mut self) -> Result<(), String>;
+}
+
+/// Where the cursor waits while this machine drives a peer: the middle of the display it is on (the first
+/// one when it is on none). At an edge, a hook may report a push further out as no move at all, and the peer
+/// would never get it; from the middle every move has room.
+pub fn park_point(displays: &[Rect], at: Option<Point>) -> Option<Point> {
+    let on = |r: &&Rect| at.is_some_and(|p| p.x >= r.x && p.x < r.x + r.w && p.y >= r.y && p.y < r.y + r.h);
+    let r = displays.iter().find(on).or_else(|| displays.first())?;
+    Some(Point { x: r.x + r.w / 2, y: r.y + r.h / 2 })
+}
+
+/// flowseam_core's sink: everything a peer sends is injected through `I`. A machine whose input is captured
+/// (see `capture`) also drives peers and has a [`Grab`]; without one the controller-only calls (grab, hide,
+/// show) are reported as bugs.
 pub struct InjectSink<I: Injector> {
     inj: I,
     displays: Vec<Rect>,
@@ -99,14 +118,38 @@ pub struct InjectSink<I: Injector> {
     num_lock_sent: Option<std::time::Instant>,
     drags: Option<Arc<Mutex<DragHub>>>,
     #[cfg(windows)]
-    edge_drop: Option<(EdgeDropSource, Edge)>,
+    edge_drop: Option<(EdgeDropSource, Vec<Edge>)>,
     /// Where this sink last sent the cursor: the base for the next relative move (see flowseam_core::cursor).
     posted: PostedCursor,
+    grab: Option<Box<dyn Grab>>,
+    /// Where the cursor stood when this machine started driving a peer. The hooks swallow every move until
+    /// it comes back, so a cursor that has left this point means Windows took the hooks out.
+    held_at: Option<Point>,
 }
 
 impl<I: Injector> InjectSink<I> {
     pub fn new(inj: I, displays: Vec<Rect>, log: fn(&str)) -> Self {
-        InjectSink { inj, displays, log, last_err: None, num_lock_sent: None, drags: None, posted: PostedCursor::default(), #[cfg(windows)] edge_drop: None }
+        InjectSink { inj, displays, log, last_err: None, num_lock_sent: None, drags: None, posted: PostedCursor::default(), grab: None, held_at: None, #[cfg(windows)] edge_drop: None }
+    }
+
+    /// Whether the cursor left the point where this machine started driving a peer: Windows removes a
+    /// low-level hook it finds too slow, without a word, and this machine's input then reaches it again.
+    /// `Ok(false)` while not driving; `Err` when the cursor cannot be read, which says nothing either way.
+    pub fn cursor_moved(&mut self) -> Result<bool, String> {
+        let Some(at) = self.held_at else { return Ok(false) };
+        let now = self.inj.cursor()?;
+        Ok((now.x - at.x).abs() > 1 || (now.y - at.y).abs() > 1)
+    }
+
+    /// This machine's input is captured: it drives peers, and `grab` keeps its cursor while it does.
+    pub fn with_grab(mut self, grab: Box<dyn Grab>) -> Self {
+        self.grab = Some(grab);
+        self
+    }
+
+    /// A point on this machine's desktop: the nearest one to `p`, which a hook may report past an edge.
+    pub fn clamp(&self, p: Point) -> Point {
+        clamp_to_displays(&self.displays, p)
     }
 
     /// File drags: presses and crossings go to `hub`.
@@ -116,14 +159,14 @@ impl<I: Injector> InjectSink<I> {
     }
 
     #[cfg(windows)]
-    pub fn with_edge_drop(mut self, source: EdgeDropSource, edge: Edge) -> Self {
-        self.edge_drop = Some((source, edge));
+    pub fn with_edge_drop(mut self, source: EdgeDropSource, edges: Vec<Edge>) -> Self {
+        self.edge_drop = Some((source, edges));
         self
     }
 
     pub fn set_displays(&mut self, d: Vec<Rect>) {
         #[cfg(windows)]
-        if let Some((source, edge)) = &self.edge_drop { source.set_edge(*edge, d.clone()); }
+        if let Some((source, edges)) = &self.edge_drop { source.set_edges(edges.clone(), d.clone()); }
         self.displays = d;
         self.posted.forget();
     }
@@ -204,15 +247,41 @@ impl<I: Injector> InputSink for InjectSink<I> {
         self.report("warp", r);
     }
 
+    /// The hooks swallow this machine's input while the forwarder drives a peer; this puts the cursor in the
+    /// middle of its display ([`park_point`]) and notes where it is held, for [`InjectSink::cursor_moved`].
     fn set_grab(&mut self, on: bool) {
-        if on {
-            (self.log)("bug: grab requested on a machine that only receives input; ignored");
+        if !on {
+            self.held_at = None;
+            return;
         }
+        let Some(grab) = &mut self.grab else {
+            (self.log)("bug: grab requested on a machine that only receives input; ignored");
+            return;
+        };
+        let from = self.inj.cursor().ok();
+        let r = match park_point(&self.displays, from) {
+            Some(p) => grab.park(p),
+            None => Err("no display to park the cursor on".into()),
+        };
+        // Parked or not, the hooks hold the cursor where it ends up, which may not be the point asked for
+        // (another program can clip the cursor): read it back.
+        self.held_at = self.inj.cursor().ok().or(from);
+        self.posted.forget();
+        self.report("park", r);
     }
     fn hide(&mut self) {
-        (self.log)("bug: hide requested on a machine that only receives input; ignored");
+        let r = match &mut self.grab {
+            Some(g) => g.hide(),
+            None => Err("bug: hide requested on a machine that only receives input; ignored".into()),
+        };
+        self.report("hide", r);
     }
-    fn show(&mut self) {}
+    fn show(&mut self) {
+        if let Some(g) = &mut self.grab {
+            let r = g.show();
+            self.report("show", r);
+        }
+    }
     /// Windows cannot detach the physical mouse; it simply keeps working alongside the peer.
     fn set_association(&mut self, _connected: bool) {}
     fn primary(&mut self, down: bool) {
@@ -294,6 +363,90 @@ impl Injector for PrintInjector {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    /// Parks the way the real one does: the cursor is where it is put.
+    struct Parks(Arc<Mutex<Point>>);
+    impl Grab for Parks {
+        fn park(&mut self, at: Point) -> Result<(), String> {
+            *self.0.lock().unwrap() = at;
+            Ok(())
+        }
+        fn hide(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        fn show(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    const BENQ: Rect = Rect { x: -2560, y: 0, w: 2560, h: 1440 };
+    const ASUS: Rect = Rect { x: 0, y: 0, w: 1920, h: 1080 };
+
+    /// The cursor leaves the left edge for the middle of the display it was on, so a push further left still
+    /// moves the peer's cursor; off every display, the first one.
+    #[test]
+    fn driving_parks_the_cursor_in_the_middle_of_its_display() {
+        let two = [BENQ, ASUS];
+        assert_eq!(park_point(&two, Some(Point { x: -2560, y: 700 })), Some(Point { x: -1280, y: 720 }));
+        assert_eq!(park_point(&two, Some(Point { x: 1919, y: 0 })), Some(Point { x: 960, y: 540 }));
+        assert_eq!(park_point(&two, Some(Point { x: 5000, y: 0 })), Some(Point { x: -1280, y: 720 }));
+        assert_eq!(park_point(&two, None), Some(Point { x: -1280, y: 720 }));
+        assert_eq!(park_point(&[], None), None);
+        let rec = Rec::default();
+        *rec.pos.lock().unwrap() = Point { x: -2560, y: 700 };
+        let mut s = InjectSink::new(rec.clone(), two.to_vec(), |_| {}).with_grab(Box::new(Parks(rec.pos.clone())));
+        s.set_grab(true);
+        assert_eq!(*rec.pos.lock().unwrap(), Point { x: -1280, y: 720 });
+        assert_eq!(s.cursor_moved(), Ok(false), "held where it was parked");
+    }
+
+    /// Parks somewhere else than asked, as a cursor clipped by another program does.
+    struct ParksClipped(Arc<Mutex<Point>>);
+    impl Grab for ParksClipped {
+        fn park(&mut self, _at: Point) -> Result<(), String> {
+            *self.0.lock().unwrap() = Point { x: -2000, y: 300 };
+            Ok(())
+        }
+        fn hide(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        fn show(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// The cursor is held where it ended up, not where it was sent: a clipped park is no lost hook.
+    #[test]
+    fn a_clipped_park_holds_where_the_cursor_is() {
+        let rec = Rec::default();
+        *rec.pos.lock().unwrap() = Point { x: -2560, y: 700 };
+        let mut s = InjectSink::new(rec.clone(), vec![BENQ], |_| {}).with_grab(Box::new(ParksClipped(rec.pos.clone())));
+        s.set_grab(true);
+        assert_eq!(s.cursor_moved(), Ok(false));
+    }
+
+    /// The hooks hold the cursor while this machine drives a peer: a cursor that moves anyway means they are
+    /// gone. Before the grab, after it, and on a machine that only receives, nothing counts.
+    #[test]
+    fn a_cursor_that_leaves_its_held_point_means_the_hooks_are_gone() {
+        let rec = Rec::default();
+        *rec.pos.lock().unwrap() = Point { x: -2560, y: 700 };
+        let mut s = InjectSink::new(rec.clone(), vec![BENQ], |_| {}).with_grab(Box::new(Parks(rec.pos.clone())));
+        assert_eq!(s.cursor_moved(), Ok(false), "not driving");
+        s.set_grab(true);
+        assert_eq!(s.cursor_moved(), Ok(false));
+        *rec.pos.lock().unwrap() = Point { x: -1279, y: 721 };
+        assert_eq!(s.cursor_moved(), Ok(false), "a pixel is rounding");
+        *rec.pos.lock().unwrap() = Point { x: -1260, y: 720 };
+        assert_eq!(s.cursor_moved(), Ok(true));
+        *rec.pos.lock().unwrap() = Point { x: -1280, y: 710 };
+        assert_eq!(s.cursor_moved(), Ok(true), "vertically too");
+        s.set_grab(false);
+        assert_eq!(s.cursor_moved(), Ok(false), "home again");
+        let mut receiver = InjectSink::new(rec.clone(), vec![], |_| {});
+        receiver.set_grab(true);
+        assert_eq!(receiver.cursor_moved(), Ok(false), "a machine that only receives holds nothing");
+    }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum Op {

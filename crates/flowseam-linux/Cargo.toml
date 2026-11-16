@@ -1,0 +1,14 @@
+[package]
+name = "flowseam-linux"
+version = "0.1.5"
+license = "MIT"
+edition = "2021"
+
+[[bin]]
+name = "flowseam-linux"
+path = "src/main.rs"
+
+[dependencies]
+flowseam-core = { path = "../flowseam-core" }
+flowseam-net = { path = "../flowseam-net" }
+libc = "0.2"

@@ -46,6 +46,49 @@ pub struct PeerRow {
 /// Choices in the order the GUI lists them; the default first.
 pub const KEY_MAPS: [KeyMap; 3] = [KeyMap::Position, KeyMap::Mac, KeyMap::None];
 
+/// The key maps a peer row offers. A PC keyboard has no Mac map: the Windows worker would downgrade it.
+pub fn key_maps(windows: bool) -> &'static [KeyMap] {
+    if windows { &[KeyMap::Position, KeyMap::None] } else { &KEY_MAPS }
+}
+
+/// What a row holding `k` shows: on Windows a stored `Mac` map is what the worker runs as `Position`.
+pub fn shown_keys(k: KeyMap, windows: bool) -> KeyMap {
+    if windows && k == KeyMap::Mac { KeyMap::Position } else { k }
+}
+
+pub fn keys_label_for(k: KeyMap, windows: bool) -> &'static str {
+    if !windows {
+        return keys_label(k);
+    }
+    match shown_keys(k, true) {
+        KeyMap::None => crate::i18n::tr("不轉換（對方也是 PC）"),
+        _ => crate::i18n::tr("依鍵盤位置（Alt=⌘、Win=⌥）"),
+    }
+}
+
+/// Windows does not capture trackpad gestures, so there is nothing to map.
+pub fn shows_gesture_map(windows: bool) -> bool {
+    !windows
+}
+
+/// The chord as keycaps read it: Mac symbols on a Mac; on a PC `cmd` in the config is the Windows key.
+pub fn chord_display(chord: &str, windows: bool) -> String {
+    if !windows {
+        return chord_symbols(chord);
+    }
+    chord
+        .split('+')
+        .map(|p| match p.trim().to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => "Ctrl".to_string(),
+            "alt" | "opt" | "option" => "Alt".to_string(),
+            "cmd" | "command" | "gui" | "win" | "super" => "Win".to_string(),
+            "shift" => "Shift".to_string(),
+            k => k.to_uppercase(),
+        })
+        .collect::<Vec<_>>()
+        .join("+")
+}
+
 /// GUI label for a key mapping mode.
 pub fn keys_label(k: KeyMap) -> &'static str {
     match k {
@@ -87,18 +130,9 @@ pub enum Role {
     Driven,
 }
 
-impl Role {
-    pub fn shows_key_mapping(self) -> bool {
-        matches!(self, Self::Controller)
-    }
-    pub fn shows_chord(self) -> bool {
-        matches!(self, Self::Controller)
-    }
-    pub fn enters_pair_code(self) -> bool {
-        matches!(self, Self::Controller)
-    }
-}
-
+/// Every machine can drive peers now, so the controls are shown everywhere; what differs by platform is only
+/// how they read (`keys_label_for`, `chord_display`) and the gesture row (`shows_gesture_map`). The role
+/// decides one thing: whether a monitor may still show this PC while nobody drives it (`back_to`).
 pub fn role() -> Role {
     if cfg!(windows) {
         Role::Driven
@@ -196,10 +230,8 @@ impl UiState {
             Err(ConfigError::Invalid(list)) => list,
             Err(other) => vec![other.to_string()],
         };
-        if role().shows_chord() {
-            if let Err(e) = check_chord(&self.chord) {
-                out.push(e);
-            }
+        if let Err(e) = check_chord(&self.chord) {
+            out.push(e);
         }
         out
     }
@@ -242,31 +274,20 @@ pub fn fingerprint_short(fp: &str) -> &str {
     fp.char_indices().nth(8).map_or(fp, |(i, _)| &fp[..i])
 }
 
+/// Modifier names shown in messages; the parser also takes control/option/command/gui/win/super.
 const MODIFIERS: [&str; 5] = ["ctrl", "alt", "opt", "cmd", "shift"];
 
-// TODO: flowseam_mac has no chord parser yet; this is a syntax-only check. Replace with the backend's
-// parser once it exists so the GUI and the worker cannot disagree on what is valid.
+/// Validates with the parser the worker runs, so the window and the worker cannot disagree on a chord.
 pub fn check_chord(s: &str) -> Result<(), String> {
-    let tokens: Vec<String> = s.split('+').map(|t| t.trim().to_ascii_lowercase()).collect();
-    if tokens.iter().any(|t| t.is_empty()) {
-        return Err(crate::i18n::trf("chord {} 含空的片段", &[&format!("{s:?}")]));
-    }
-    let (key, mods) = tokens.split_last().expect("split 至少回傳一段");
-    if MODIFIERS.contains(&key.as_str()) {
-        return Err(crate::i18n::trf("chord {} 最後一段必須是按鍵，不是修飾鍵", &[&format!("{s:?}")]));
-    }
-    if mods.is_empty() {
-        return Err(crate::i18n::trf("chord {} 至少要一個修飾鍵（{}）", &[&format!("{s:?}"), &MODIFIERS.join("/")]));
-    }
-    for (i, m) in mods.iter().enumerate() {
-        if !MODIFIERS.contains(&m.as_str()) {
-            return Err(crate::i18n::trf("chord {} 的 {} 不是修飾鍵（{}）", &[&format!("{s:?}"), &format!("{m:?}"), &MODIFIERS.join("/")]));
-        }
-        if mods[..i].contains(m) {
-            return Err(crate::i18n::trf("chord {} 的 {} 重複", &[&format!("{s:?}"), &format!("{m:?}")]));
-        }
-    }
-    Ok(())
+    use flowseam_core::chord::{parse, ChordError};
+    let q = format!("{s:?}");
+    parse(s).map(|_| ()).map_err(|e| match e {
+        ChordError::Empty => crate::i18n::trf("chord {} 含空的片段", &[&q]),
+        ChordError::UnknownToken(t) if t.is_empty() => crate::i18n::trf("chord {} 含空的片段", &[&q]),
+        ChordError::UnknownToken(t) | ChordError::TwoKeys(t, _) => crate::i18n::trf("chord {} 的 {} 不是修飾鍵（{}）", &[&q, &format!("{t:?}"), &MODIFIERS.join("/")]),
+        ChordError::NoKey => crate::i18n::trf("chord {} 最後一段必須是按鍵，不是修飾鍵", &[&q]),
+        ChordError::NoModifier => crate::i18n::trf("chord {} 至少要一個修飾鍵（{}）", &[&q, &MODIFIERS.join("/")]),
+    })
 }
 
 #[cfg(test)]
@@ -328,16 +349,22 @@ mod tests {
         ui.chord = "ctrl+".into();
         ui.arm_dist = 0;
         let all = ui.problems().join("|");
-        // The chord is checked only where it is shown: a driven machine (Windows) never switches.
-        assert_eq!(all.contains("chord"), role().shows_chord(), "{all}");
+        assert!(all.contains("chord"), "{all}");
         assert!(all.contains("arm_dist"), "{all}");
+    }
+
+    #[test]
+    fn a_win_chord_does_not_block_save() {
+        let mut ui = UiState::from_config(&sample());
+        ui.chord = "ctrl+alt+win+s".into();
+        assert!(!ui.problems().iter().any(|p| p.contains("chord")));
     }
 
     #[test]
     fn chord_shapes() {
         assert!(check_chord("ctrl+alt+cmd+s").is_ok());
         assert!(check_chord("Ctrl + Shift + F1").is_ok());
-        for bad in ["", "s", "ctrl", "ctrl+alt", "ctrl+ctrl+s", "foo+s", "ctrl++s", "+s"] {
+        for bad in ["", "s", "ctrl", "ctrl+alt", "foo+s", "ctrl++s", "+s"] {
             assert!(check_chord(bad).is_err(), "{bad:?} 應被拒");
         }
     }
@@ -444,15 +471,58 @@ mod sharing_tests {
 }
 
 #[cfg(test)]
-mod role_tests {
+mod platform_tests {
     use super::*;
+
     #[test]
-    fn driven_hides_controller_only_controls() {
-        assert!(!Role::Driven.shows_key_mapping());
-        assert!(!Role::Driven.shows_chord());
-        assert!(!Role::Driven.enters_pair_code());
-        assert!(Role::Controller.shows_key_mapping());
-        assert!(Role::Controller.shows_chord());
-        assert!(Role::Controller.enters_pair_code());
+    fn windows_offers_no_mac_key_map() {
+        assert_eq!(key_maps(false), &[KeyMap::Position, KeyMap::Mac, KeyMap::None]);
+        assert_eq!(key_maps(true), &[KeyMap::Position, KeyMap::None]);
+    }
+
+    #[test]
+    fn a_stored_mac_map_shows_as_position_on_windows() {
+        assert_eq!(shown_keys(KeyMap::Mac, true), KeyMap::Position);
+        assert_eq!(shown_keys(KeyMap::Mac, false), KeyMap::Mac);
+        assert_eq!(shown_keys(KeyMap::None, true), KeyMap::None);
+    }
+
+    #[test]
+    fn key_labels_follow_the_keyboard_in_front_of_you() {
+        for k in [KeyMap::Position, KeyMap::Mac, KeyMap::None] {
+            assert_eq!(keys_label_for(k, false), keys_label(k), "the Mac labels do not change");
+        }
+        assert!(keys_label_for(KeyMap::Position, true).contains("Alt=⌘"));
+        assert!(keys_label_for(KeyMap::None, true).contains("PC"));
+        assert_eq!(keys_label_for(KeyMap::Mac, true), keys_label_for(KeyMap::Position, true));
+    }
+
+    #[test]
+    fn only_the_mac_has_gesture_rows() {
+        assert!(shows_gesture_map(false));
+        assert!(!shows_gesture_map(true));
+    }
+
+    #[test]
+    fn chord_accepts_every_modifier_spelling_the_worker_parses() {
+        for ok in ["ctrl+alt+win+s", "ctrl+super+s", "control+command+s", "option+gui+f1"] {
+            assert!(check_chord(ok).is_ok(), "{ok:?}");
+        }
+        for bad in ["ctrl+", "ctrl+banana", "ctrl+a+b", "win", "s"] {
+            assert!(check_chord(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn windows_names_cover_win_and_gui() {
+        assert_eq!(chord_display("ctrl+alt+win+s", true), "Ctrl+Alt+Win+S");
+        assert_eq!(chord_display("ctrl+gui+s", true), "Ctrl+Win+S");
+    }
+
+    #[test]
+    fn chord_reads_in_the_names_on_the_keyboard() {
+        assert_eq!(chord_display("ctrl+alt+cmd+s", false), "⌃⌥⌘S");
+        assert_eq!(chord_display("ctrl+alt+cmd+s", true), "Ctrl+Alt+Win+S");
+        assert_eq!(chord_display("shift+opt+f1", true), "Shift+Alt+F1");
     }
 }

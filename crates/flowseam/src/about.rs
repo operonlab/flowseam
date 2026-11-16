@@ -20,6 +20,12 @@ pub fn show_update_check() { UPDATE_CHECK_REQUESTED.store(true, AtomicOrdering::
 struct Note { icon: Icon, tint: Color32, title: &'static str, body: &'static str }
 struct Release { version: &'static str, items: &'static [Note] }
 const NOTES: &[Release] = &[
+    Release { version: "0.1.5", items: &[
+        Note { icon: Icon::Arrows, tint: BLUE, title: "Windows 也能操作 Mac", body: "Windows PC 可以用自己的鍵盤滑鼠操作 Mac：把游標推到通往 Mac 的邊緣，或按 Ctrl+Alt+Win+S。按鍵依位置對應（Alt＝⌘、Win＝⌥），檔案可以雙向拖曳，按 Ctrl+Alt+Win+Esc 隨時拿回來。" },
+        Note { icon: Icon::Link, tint: GREEN, title: "Windows 同時連著每一台", body: "Windows PC 會同時連著清單裡的每一台電腦，也會主動連過去。設定視窗多了切換快捷鍵與按鍵對應，也能輸入另一台的配對碼。" },
+        Note { icon: Icon::Sliders, tint: TEAL, title: "被操作的 Mac 也能交還", body: "另一台電腦操作這台 Mac 時，選單會出現「回到…」：按下就把鍵盤滑鼠交還給它，並請它把螢幕切回去。" },
+        Note { icon: Icon::Display, tint: PURPLE, title: "實驗中：Windows 觸控板與切螢幕", body: "Windows 精確式觸控板的三指、四指滑動會送到被操作的電腦，到了 Mac 就是 Mac 自己的手勢；Windows 也能跟著切螢幕。兩者都還沒在實機上試過。" },
+    ] },
     Release { version: "0.1.4", items: &[
         Note { icon: Icon::Display, tint: PURPLE, title: "螢幕跟著一起切換", body: "在 Apple 晶片的 Mac 上，可以加入同時接著另一台電腦的螢幕，並選好顯示那台的輸入來源。選單列的切換按鈕會先切勾選的螢幕，再切鍵盤滑鼠；有一台失敗就全部切回來。兩台都需要這一版。" },
         Note { icon: Icon::Arrows, tint: BLUE, title: "觸控板手勢送到對方", body: "切換空間、指揮中心、App Exposé、顯示桌面與 App 啟動器，會變成被操作那台電腦自己的快捷鍵，不再同時作用在這台 Mac 上。" },

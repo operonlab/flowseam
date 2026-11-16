@@ -1,4 +1,12 @@
 {
+  "Windows 也能操作 Mac": { "en": "A Windows PC drives a Mac too", "ja": "Windows PC からも Mac を操作", "ko": "Windows PC에서도 Mac 제어" },
+  "Windows PC 可以用自己的鍵盤滑鼠操作 Mac：把游標推到通往 Mac 的邊緣，或按 Ctrl+Alt+Win+S。按鍵依位置對應（Alt＝⌘、Win＝⌥），檔案可以雙向拖曳，按 Ctrl+Alt+Win+Esc 隨時拿回來。": { "en": "A Windows PC can drive a Mac with its own keyboard and mouse: push the cursor to the edge facing the Mac, or press Ctrl+Alt+Win+S. Keys go by position (Alt=⌘, Win=⌥), files can be dragged both ways, and Ctrl+Alt+Win+Esc brings everything back.", "ja": "Windows PC から、その PC のキーボードとマウスで Mac を操作できるようになりました。Mac 側の端へポインタを押し出すか、Ctrl+Alt+Win+S を押します。キーは位置どおりに対応し（Alt=⌘、Win=⌥）、ファイルは双方向にドラッグでき、Ctrl+Alt+Win+Esc でいつでも取り戻せます。", "ko": "Windows PC가 자신의 키보드와 마우스로 Mac을 제어할 수 있습니다. Mac 쪽 가장자리로 포인터를 밀거나 Ctrl+Alt+Win+S를 누르세요. 키는 위치대로 대응하고(Alt=⌘, Win=⌥), 파일은 양방향으로 끌어다 놓을 수 있으며, Ctrl+Alt+Win+Esc로 언제든 되찾습니다." },
+  "Windows 同時連著每一台": { "en": "Windows links with every computer", "ja": "Windows がすべてのコンピュータと同時に接続", "ko": "Windows가 모든 컴퓨터와 동시에 연결" },
+  "Windows PC 會同時連著清單裡的每一台電腦，也會主動連過去。設定視窗多了切換快捷鍵與按鍵對應，也能輸入另一台的配對碼。": { "en": "A Windows PC keeps a link to every computer in its list at once and connects to them itself. Its settings window gains the switch shortcut and Key Mapping, and can type another computer's pairing code.", "ja": "Windows PC は一覧にあるすべてのコンピュータと同時につながり、自分からも接続します。設定ウィンドウに切り替えのショートカットとキーの割り当てが加わり、相手のペアリングコードも入力できます。", "ko": "Windows PC가 목록의 모든 컴퓨터와 동시에 연결되고 직접 접속도 합니다. 설정 창에 전환 단축키와 키 매핑이 추가되었고, 다른 컴퓨터의 페어링 코드도 입력할 수 있습니다." },
+  "被操作的 Mac 也能交還": { "en": "Hand control back from a Mac", "ja": "操作されている Mac からも返せる", "ko": "제어받는 Mac에서도 돌려주기" },
+  "另一台電腦操作這台 Mac 時，選單會出現「回到…」：按下就把鍵盤滑鼠交還給它，並請它把螢幕切回去。": { "en": "While another computer drives this Mac, its menu shows Back to…: it hands the keyboard and mouse back and asks that computer to bring its monitors home.", "ja": "別のコンピュータがこの Mac を操作しているとき、メニューに「…に戻る」が表示されます。選ぶとキーボードとマウスを返し、相手にモニタを元に戻すよう頼みます。", "ko": "다른 컴퓨터가 이 Mac을 제어하는 동안 메뉴에 '…(으)로 돌아가기'가 나타납니다. 누르면 키보드와 마우스를 돌려주고, 그 컴퓨터에 모니터를 되돌리도록 요청합니다." },
+  "實驗中：Windows 觸控板與切螢幕": { "en": "Experimental: Windows touchpad and monitors", "ja": "試験的：Windows のタッチパッドとモニタ", "ko": "실험적: Windows 터치패드와 모니터" },
+  "Windows 精確式觸控板的三指、四指滑動會送到被操作的電腦，到了 Mac 就是 Mac 自己的手勢；Windows 也能跟著切螢幕。兩者都還沒在實機上試過。": { "en": "Three- and four-finger swipes on a Windows Precision Touchpad reach the computer the PC drives, arriving on a Mac as the Mac's own gestures, and a Windows PC can switch monitors too. Neither has been tried on real hardware yet.", "ja": "Windows の高精度タッチパッドでの 3 本指・4 本指スワイプが操作先のコンピュータに届き、Mac では Mac 自身のジェスチャになります。Windows でもモニタを切り替えられます。どちらもまだ実機では試していません。", "ko": "Windows 정밀 터치패드의 세 손가락·네 손가락 스와이프가 제어 중인 컴퓨터로 전달되며, Mac에서는 Mac 자체 제스처가 됩니다. Windows에서도 모니터를 전환할 수 있습니다. 둘 다 아직 실제 하드웨어에서 시험하지 않았습니다." },
   "螢幕跟著一起切換": { "en": "Monitors switch too", "ja": "モニタも一緒に切り替え", "ko": "모니터도 함께 전환" },
   "在 Apple 晶片的 Mac 上，可以加入同時接著另一台電腦的螢幕，並選好顯示那台的輸入來源。選單列的切換按鈕會先切勾選的螢幕，再切鍵盤滑鼠；有一台失敗就全部切回來。兩台都需要這一版。": { "en": "On a Mac with Apple silicon, add the monitors that are also cabled to another computer and pick the input that shows it. The switch button in the menu bar switches the ticked monitors first, then the keyboard and mouse; if one fails, they all switch back. Both computers need this version.", "ja": "Apple シリコン搭載の Mac では、別のコンピュータにもつながっているモニタを追加し、そのコンピュータを映す入力を選べます。メニューバーの切り替えボタンは、チェックしたモニタを先に切り替えてから、キーボードとマウスを切り替えます。1 台でも失敗するとすべて元に戻ります。両方のコンピュータにこのバージョンが必要です。", "ko": "Apple 실리콘 Mac에서는 다른 컴퓨터에도 연결된 모니터를 추가하고 그 컴퓨터를 보여 주는 입력을 고를 수 있습니다. 메뉴 막대의 전환 버튼은 선택한 모니터를 먼저 전환한 뒤 키보드와 마우스를 전환합니다. 하나라도 실패하면 모두 되돌아갑니다. 두 컴퓨터 모두 이 버전이 필요합니다." },
   "觸控板手勢送到對方": { "en": "Trackpad gestures reach the other computer", "ja": "トラックパッドのジェスチャを相手に送信", "ko": "트랙패드 제스처를 상대 컴퓨터로" },
@@ -55,15 +63,30 @@
     "ja": "複数のディスプレイをつないだ Mac でも、別のコンピュータからドラッグして戻したファイルが、「ダウンロード」ではなくボタンを離した場所に置かれます。",
     "ko": "화면이 여러 개인 Mac에서도 다른 컴퓨터에서 끌어온 파일이 다운로드 폴더가 아니라 놓은 위치에 놓입니다."
   },
-  "Mac 的游標移過來時，就由 Mac 操作這台電腦。": {
-    "en": "Move the Mac pointer here to control this computer.",
-    "ja": "Macのポインタを移動すると、このコンピュータを操作できます。",
-    "ko": "Mac 포인터를 이쪽으로 옮기면 이 컴퓨터를 제어할 수 있습니다."
-  },
   "Mac 的選單列和 Windows 的系統匣會顯示共用是否開啟、連著哪幾台。關掉視窗後 Flowseam 仍會繼續執行。": {
     "en": "The Mac menu bar and the Windows tray show whether sharing is on and which computers are connected. Closing the window keeps Flowseam running.",
     "ja": "Mac のメニューバーと Windows のタスクトレイに、共有のオン・オフと接続中のコンピュータが表示されます。ウインドウを閉じても Flowseam は動き続けます。",
     "ko": "Mac 메뉴 막대와 Windows 트레이에 공유가 켜져 있는지, 어떤 컴퓨터가 연결되어 있는지 표시됩니다. 창을 닫아도 Flowseam은 계속 실행됩니다."
+  },
+  "addr {} 不是 host:port（{}）": {
+    "en": "Address {} is not host:port ({})",
+    "ja": "アドレス {} は host:port ではありません（{}）",
+    "ko": "주소 {}은(는) host:port 형식이 아닙니다({})"
+  },
+  "PC 鍵盤的按鍵到對方怎麼解讀": {
+    "en": "How the other computer interprets PC keys",
+    "ja": "相手のコンピュータでのPCキーの扱い",
+    "ko": "상대 컴퓨터에서 PC 키를 해석하는 방식"
+  },
+  "依鍵盤位置（Alt=⌘、Win=⌥）": {
+    "en": "By key position (Alt=⌘, Win=⌥)",
+    "ja": "キーの位置に合わせる（Alt=⌘、Win=⌥）",
+    "ko": "키 위치 기준(Alt=⌘, Win=⌥)"
+  },
+  "不轉換（對方也是 PC）": {
+    "en": "No remapping (other computer is a PC)",
+    "ja": "変換しない（相手もPC）",
+    "ko": "변환 안 함(상대도 PC)"
   },
   "Mac 鍵盤的按鍵到對方怎麼解讀": {
     "en": "How the other computer interprets Mac keys",
@@ -100,11 +123,6 @@
     "en": "{}: {} is not a modifier ({})",
     "ja": "{}: {}は修飾キーではありません（{}）",
     "ko": "{}: {}은(는) 보조 키가 아닙니다({})"
-  },
-  "chord {} 的 {} 重複": {
-    "en": "{} repeats modifier {}",
-    "ja": "{}で修飾キー{}が重複しています",
-    "ko": "{}에 보조 키 {}이(가) 중복되었습니다"
   },
   "chord {} 至少要一個修飾鍵（{}）": {
     "en": "Shortcut {} needs at least one modifier ({})",
@@ -311,6 +329,16 @@
     "ja": "確認済み",
     "ko": "확인됨"
   },
+  "無法穩定辨識": {
+    "en": "cannot be identified reliably",
+    "ja": "確実に識別できません",
+    "ko": "안정적으로 식별할 수 없음"
+  },
+  "先選這台 PC 用的輸入": { "en": "Pick this PC's input first", "ja": "先にこの PC の入力を選んでください", "ko": "먼저 이 PC의 입력을 선택하세요" },
+  "這台 PC 用的輸入": { "en": "This PC's input", "ja": "この PC の入力", "ko": "이 PC의 입력" },
+  "把這台的螢幕都切回這台 PC": { "en": "Switch all of its displays back to this PC", "ja": "このデバイスの画面をすべてこの PC に戻します", "ko": "이 기기의 화면을 모두 이 PC로 되돌립니다" },
+  "{} 會切到 {}，{} 秒後自動切回 {}。這段時間看不到這台 PC 的畫面，鍵盤和滑鼠會留在 PC。": { "en": "{} will switch to {}, then after {} seconds come back to {}. Until then this PC's screen is not on it; the keyboard and mouse stay on the PC.", "ja": "{} は {} に切り替わり、{} 秒後に自動で {} に戻ります。その間この PC の画面は表示されず、キーボードとマウスは PC のままです。", "ko": "{}이(가) {}(으)로 전환되고 {}초 뒤 자동으로 {}(으)로 돌아옵니다. 그동안 이 PC 화면은 보이지 않으며 키보드와 마우스는 PC에 남습니다." },
+  "{} 會一起切到 {} 用的輸入，{} 秒後自動切回。這段時間看不到這台 PC 的畫面，鍵盤和滑鼠會留在 PC。": { "en": "{} will switch together to the inputs {} uses, then after {} seconds come back. Until then this PC's screen is not on them; the keyboard and mouse stay on the PC.", "ja": "{} は {} が使う入力にまとめて切り替わり、{} 秒後に戻ります。その間この PC の画面は表示されず、キーボードとマウスは PC のままです。", "ko": "{}이(가) {}이(가) 쓰는 입력으로 함께 전환되고 {}초 뒤 돌아옵니다. 그동안 이 PC 화면은 보이지 않으며 키보드와 마우스는 PC에 남습니다." },
   "尚未確認": {
     "en": "Not confirmed",
     "ja": "未確認",
@@ -503,20 +531,15 @@
     "ja": "Windows でもフォルダへ直接ドロップ",
     "ko": "Windows에서도 폴더에 바로 놓기"
   },
-  "在{}側": {
-    "en": "On the {} side",
-    "ja": "{}側",
-    "ko": "{}쪽"
-  },
   "在{}側 · {}": {
     "en": "On the {} side · {}",
     "ja": "{}側 · {}",
     "ko": "{}쪽 · {}"
   },
-  "在另一台電腦開啟配對：Windows 會顯示 6 位數字；兩台 Mac 配對時，請其中一台按「顯示配對碼」。": {
-    "en": "Open Pairing on the other computer. A Windows PC shows a 6-digit code; to pair two Macs, choose Show Pairing Code on one of them.",
-    "ja": "もう一方のコンピュータでペアリングを開きます。Windows には 6 桁のコードが表示されます。Mac 同士をペアリングするときは、どちらか一方で「ペアリングコードを表示」を選びます。",
-    "ko": "다른 컴퓨터에서 페어링을 엽니다. Windows에는 6자리 코드가 표시됩니다. Mac 두 대를 페어링하려면 한쪽에서 '페어링 코드 표시'를 선택하세요."
+  "在另一台電腦開啟「配對」並按「顯示配對碼」，它會顯示 6 位數字。": {
+    "en": "Open Pairing on the other computer and choose Show Pairing Code: it shows a 6-digit code.",
+    "ja": "もう一方のコンピュータで「ペアリング」を開き、「ペアリングコードを表示」を選ぶと、6 桁のコードが表示されます。",
+    "ko": "다른 컴퓨터에서 '페어링'을 열고 '페어링 코드 표시'를 선택하면 6자리 코드가 표시됩니다."
   },
   "在檔案總管中顯示": {
     "en": "Show in File Explorer",
@@ -1128,11 +1151,6 @@
     "ja": "デバイスを選び、コードを入力して「ペアリング」を選択します。",
     "ko": "기기를 선택하고 코드를 입력한 다음 페어링을 선택하세요."
   },
-  "選擇要配對的 Mac。": {
-    "en": "Select the Mac to pair.",
-    "ja": "ペアリングするMacを選びます。",
-    "ko": "페어링할 Mac을 선택하세요."
-  },
   "還沒有可配對的裝置": {
     "en": "No devices available to pair",
     "ja": "ペアリングできるデバイスがありません",
@@ -1267,11 +1285,6 @@
     "en": "Show Pairing Code",
     "ja": "ペアリングコードを表示",
     "ko": "페어링 코드 표시"
-  },
-  "顯示配對碼，並在 Mac 上輸入。": {
-    "en": "Show the pairing code and enter it on the Mac.",
-    "ja": "ペアリングコードを表示し、Macで入力します。",
-    "ko": "페어링 코드를 표시하고 Mac에서 입력하세요."
   },
   "（未命名）": {
     "en": "(Unnamed)",

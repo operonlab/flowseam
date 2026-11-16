@@ -209,7 +209,7 @@ mod tests {
         used.extend(page_re.captures_iter(include_str!("gui.rs")).map(|c| c[1].to_owned()));
         // Release notes are drawn through tr(note.title) / tr(note.body), not literals at the call.
         // The worker's reasons for a link being down reach the window through status.toml (tr_runtime).
-        let worker = include_str!("../../flowseam-mac/src/links.rs");
+        let worker = include_str!("../../flowseam-net/src/links.rs");
         let describe = &worker[worker.find("fn describe").unwrap()..worker.find("fn mark_down").unwrap()];
         let reason_re = regex::Regex::new(r#"=> (?:format!\()?"([^"{]+)(\{[a-z:?]+\})?"#).unwrap();
         used.extend(reason_re.captures_iter(describe).map(|c| if c.get(2).is_some() { format!("{}{{}}", &c[1]) } else { c[1].to_owned() }));

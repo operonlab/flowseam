@@ -26,8 +26,7 @@ use flowseam_core::proto::{Point, Rect};
 use crate::inject::{Injector, WinButton};
 use crate::keymap::Scan;
 
-/// Tags every event we inject ("kmsh"), so a future capture hook on this machine can skip its own output.
-pub const INJECT_MARK: usize = 0x6B6D_7368;
+pub use crate::capture::INJECT_MARK;
 const WHEEL_DELTA: i32 = 120;
 const XBUTTON1: u32 = 1;
 const XBUTTON2: u32 = 2;

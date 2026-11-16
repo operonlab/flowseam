@@ -20,30 +20,30 @@ https://github.com/user-attachments/assets/be5499eb-c39a-4722-b87a-0203b3a30c64
 > **Status: early (0.1).** Used every day on two Macs and a Windows PC. Expect rough edges, and keep every
 > machine on the same version.
 
-<p align="center"><img src="docs/readme/how-it-works.svg" width="900" alt="A MacBook Pro, a Mac mini with the keyboard and mouse, and a Windows PC side by side. Between the Macs, pointer and keyboard, clipboard, files and media keys cross both ways. From the Mac mini to the Windows PC, pointer, keyboard and media keys go one way; clipboard and files go both ways."></p>
+<p align="center"><img src="docs/readme/how-it-works.svg" width="900" alt="A MacBook Pro, a Mac mini with the keyboard and mouse, and a Windows PC side by side. Pointer and keyboard, clipboard, files and media keys cross both ways between the Macs, and both ways between the Mac mini and the Windows PC."></p>
 
 ## What crosses the edge
 
 | | Mac ↔ Mac | Mac ↔ Windows PC |
 |---|:-:|:-:|
-| Pointer and keyboard | ⇄ | → |
+| Pointer and keyboard | ⇄ | ⇄ |
 | Clipboard text | ⇄ | ⇄ |
 | Files, dropped where you release them | ⇄ | ⇄ |
-| Volume and media keys | ⇄ | → |
+| Volume and media keys | ⇄ | ⇄ |
 
-⇄ both ways · → from the Mac only. A Windows PC is controlled; it does not control another computer.
-Files come back from it while a Mac drives it.
+⇄ both ways: whichever computer has the keyboard and mouse drives the other, a Mac or a Windows PC.
 
 ## What sets it apart
 
-- **Switch on purpose.** Rest the pointer at a shared edge for 200 ms, or press ⌃⌥⌘S. While a mouse button is
-  held the pointer stays on its screen, so dragging a window or selecting text never lands on the next
-  computer. Dragging files is the one exception.
+- **Switch on purpose.** Rest the pointer at a shared edge for 200 ms, or press ⌃⌥⌘S (Ctrl+Alt+Win+S on a PC).
+  While a mouse button is held the pointer stays on its screen, so dragging a window or selecting text never
+  lands on the next computer. Dragging files is the one exception.
 - **Through one Mac to the next.** A MacBook driving the Mac mini carries on through it to the Windows PC on
   its far side: the Mac in the middle passes the pointer and keys along.
-- **Always a way back.** ⌃⌥⌘Esc returns the mouse and keyboard to the Mac. Touch the mouse or keyboard of a Mac
-  that another computer is driving, and that Mac takes over. If the background process hangs, or macOS takes a
-  permission away while sharing, input is released instead of staying locked.
+- **Always a way back.** ⌃⌥⌘Esc (Ctrl+Alt+Win+Esc on a PC) returns the mouse and keyboard to the computer they
+  belong to. Touch the mouse or keyboard of a computer that another one is driving, and it takes over. If the
+  background process hangs, or macOS takes a permission away while sharing, input is released instead of
+  staying locked.
 - **Mac shortcuts on Windows.** ⌘C copies, ⌘Tab switches apps, tapping ⌥ opens Start. See
   [Keys and shortcuts](#keys-and-shortcuts).
 - **The fastest link between Macs.** With more than one network between two Macs, Flowseam takes the
@@ -103,7 +103,7 @@ cargo build --release -p flowseam
 ```
 
 Flowseam opens its settings window and puts an icon in the tray. Let it through Windows Firewall when asked:
-the Mac connects to it on TCP port 24800.
+the other computers connect to it on TCP port 24800.
 
 ## Set up
 
@@ -113,18 +113,17 @@ the Mac connects to it on TCP port 24800.
 | **2. Pair** | **Pairing** | One computer shows a code and the other types it in; see below. Pairing happens once. |
 | **3. Share** | The window, or the menu bar icon | Turn on **Share keyboard and mouse** and push the pointer across the edge. |
 
-To pair, on the computer that shows the code (the Windows PC, or either Mac when you pair two Macs), turn
-sharing off, since pairing uses the same port. Open **Pairing**, pick the other computer and choose **Show
-Pairing Code**. On the other Mac, open **Pairing**, pick the first computer, type the code, choose **Pairing**, then
-choose **Save**.
+To pair, pick either computer to show the code and turn sharing off on it, since pairing uses the same port.
+Open **Pairing**, pick the other computer and choose **Show Pairing Code**. On the other computer, open
+**Pairing**, pick the first computer, type the code, choose **Pairing**, then choose **Save**.
 
 ## Keys and shortcuts
 
-| On the Mac | Does |
-|---|---|
-| Rest at a shared edge for 200 ms | Switch to the computer on that side |
-| ⌃⌥⌘S | Switch over without resting at the edge; press it again on the other computer to come back |
-| ⌃⌥⌘Esc | Take the mouse and keyboard back to this Mac |
+| On a Mac | On a PC | Does |
+|---|---|---|
+| Rest at a shared edge for 200 ms | The same | Switch to the computer on that side |
+| ⌃⌥⌘S | Ctrl+Alt+Win+S | Switch over without resting at the edge; press it again on the other computer to come back |
+| ⌃⌥⌘Esc | Ctrl+Alt+Win+Esc | Take the mouse and keyboard back to this computer |
 
 The dwell time and the switch shortcut are set under **Switching**. How the other computer reads the Mac's
 keys is set for each computer, under **Devices & Edges › Key Mapping**:
@@ -134,6 +133,8 @@ keys is set for each computer, under **Devices & Edges › Key Mapping**:
 | No remapping | Another Mac |
 | By key position (⌥=Win, ⌘=Alt) | A PC, with the keys where a PC keyboard has them |
 | Mac shortcuts | A PC, with the shortcuts your hands already know |
+
+On a PC, the Key Mapping for a Mac is **By key position (Alt=⌘, Win=⌥)**, the default.
 
 With **Mac shortcuts**:
 
@@ -168,7 +169,7 @@ The full table is in [`crates/flowseam-core/src/mac_shortcuts.rs`](crates/flowse
 
 ## Known limitations
 
-- A Windows PC can be controlled but cannot control another computer.
+- A PC driving a Mac sends keys by position only; there is no PC-shortcut translation the other way.
 - The clipboard carries text only: no images, rich text or files.
 - No Linux support.
 - Windows has no installer, and its exe is not signed: SmartScreen warns the first time it runs.

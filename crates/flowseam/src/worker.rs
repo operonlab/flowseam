@@ -231,7 +231,9 @@ impl WorkerHandle {
     pub fn escalate(&self, since: Instant) {
         let waited = since.elapsed();
         #[cfg(windows)]
-        if waited > Duration::from_secs(3) {
+        // After the worker's own limit for bringing monitors home (`KVM_STOP_LIMIT`, 4 s), as the Mac's SIGKILL
+        // waits for it; what it has not confirmed by then, `monitor_home_after` sends home.
+        if waited > Duration::from_secs(6) {
             let _ = Command::new("taskkill")
                 .args(["/PID", &self.pid.to_string(), "/F"])
                 .status();

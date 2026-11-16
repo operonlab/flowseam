@@ -64,6 +64,38 @@ fn check_size(text: &str) -> Result<(), NetError> {
     }
 }
 
+/// A failure that comes back on every poll (a locked Windows desktop fails each one for as long as it
+/// stays locked; one line per poll pushed everything else out of the log) is logged once. The same
+/// failure again is only counted, and the count is logged once polling works again.
+#[derive(Debug, Default)]
+pub struct Repeats {
+    last: Option<(String, String)>,
+    unlogged: u32,
+}
+
+impl Repeats {
+    /// `what` failed with `e`: logged as "{what}: {e}" unless it is the failure already logged.
+    pub fn failed(&mut self, what: &str, e: String, log: &dyn Fn(&str)) {
+        if self.last.as_ref().is_some_and(|(w, last)| w == what && *last == e) {
+            self.unlogged += 1;
+            return;
+        }
+        self.settle(log);
+        log(&format!("{what}: {e}"));
+        self.last = Some((what.to_owned(), e));
+    }
+
+    /// It worked again, or polling stopped: log how many repeats went unlogged, if any.
+    pub fn settle(&mut self, log: &dyn Fn(&str)) {
+        if let Some((what, e)) = self.last.take() {
+            if self.unlogged > 0 {
+                log(&format!("{what} {} more times the same way: {e}", self.unlogged));
+            }
+        }
+        self.unlogged = 0;
+    }
+}
+
 /// Glue between the OS clipboard and `ClipboardSync` for one session. Every
 /// failure is logged and swallowed: clipboard trouble never ends the link.
 pub struct ClipboardPump {
@@ -72,6 +104,13 @@ pub struct ClipboardPump {
     last_count: Option<u64>,
     /// Change count whose read last failed, so a stuck read is logged once, not every tick.
     failed_count: Option<u64>,
+    /// A change count that cannot be read at all, logged once while it lasts.
+    count_failing: Repeats,
+    log: fn(&str),
+}
+
+fn log_stderr(m: &str) {
+    eprintln!("{m}");
 }
 
 impl ClipboardPump {
@@ -85,15 +124,24 @@ impl ClipboardPump {
                 None
             }
         };
-        Self { os, sync: ClipboardSync::new(), last_count, failed_count: None }
+        Self { os, sync: ClipboardSync::new(), last_count, failed_count: None, count_failing: Repeats::default(), log: log_stderr }
+    }
+
+    /// Logs through `log` instead of stderr.
+    pub fn with_log(mut self, log: fn(&str)) -> Self {
+        self.log = log;
+        self
     }
 
     /// One poll tick: a message to send if the local clipboard changed.
     pub fn poll(&mut self) -> Option<Msg> {
         let n = match self.os.change_count() {
-            Ok(n) => n,
+            Ok(n) => {
+                self.count_failing.settle(&self.log);
+                n
+            }
             Err(e) => {
-                eprintln!("flowseam clipboard: change_count failed: {e}");
+                self.count_failing.failed("flowseam clipboard: change_count failed", e, &self.log);
                 return None;
             }
         };
@@ -222,6 +270,7 @@ mod tests {
         text: Option<String>,
         fail_write: bool,
         fail_reads: u32,
+        fail_counts: u32,
         writes: Vec<String>,
     }
     #[derive(Default)]
@@ -235,7 +284,12 @@ mod tests {
     }
     impl ClipboardOs for Fake {
         fn change_count(&self) -> Result<u64, String> {
-            Ok(self.0.lock().unwrap().count)
+            let mut g = self.0.lock().unwrap();
+            if g.fail_counts > 0 {
+                g.fail_counts -= 1;
+                return Err("no clipboard access".into());
+            }
+            Ok(g.count)
         }
         fn read_text(&self) -> Result<Option<String>, String> {
             let mut g = self.0.lock().unwrap();
@@ -325,6 +379,35 @@ mod tests {
             "the copy must still go out once the read succeeds"
         );
         assert_eq!(p.poll(), None);
+    }
+
+    static LOGGED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    fn record(m: &str) {
+        LOGGED.lock().unwrap().push(m.into());
+    }
+
+    /// A clipboard that cannot be read at all (a locked Windows desktop) is logged once while it lasts,
+    /// and how many more polls failed is logged when it can be read again.
+    #[test]
+    fn pump_logs_a_clipboard_it_cannot_read_once_while_it_lasts() {
+        let f = Arc::new(Fake::default());
+        let mut p = ClipboardPump::new(f.clone()).with_log(record);
+        f.0.lock().unwrap().fail_counts = 5;
+        for _ in 0..5 {
+            assert_eq!(p.poll(), None);
+        }
+        f.user_copies("after unlock");
+        assert!(p.poll().is_some(), "the copy goes out once the clipboard reads again");
+        f.0.lock().unwrap().fail_counts = 1;
+        assert_eq!(p.poll(), None);
+        assert_eq!(
+            *LOGGED.lock().unwrap(),
+            [
+                "flowseam clipboard: change_count failed: no clipboard access",
+                "flowseam clipboard: change_count failed 4 more times the same way: no clipboard access",
+                "flowseam clipboard: change_count failed: no clipboard access",
+            ]
+        );
     }
 
     #[test]

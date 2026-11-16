@@ -519,17 +519,7 @@ fn files_on(pb: &objc2_app_kit::NSPasteboard) -> Result<Vec<std::path::PathBuf>,
     })
 }
 
-/// Bytes an unprivileged process may still write on the volume holding `p`.
-pub fn free_bytes(p: &std::path::Path) -> Result<u64, String> {
-    use std::os::unix::ffi::OsStrExt;
-    let c = std::ffi::CString::new(p.as_os_str().as_bytes()).map_err(|_| "path contains NUL".to_string())?;
-    // SAFETY: `c` is a valid C string and `st` a correctly sized out-parameter.
-    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
-    if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 {
-        return Err(format!("statvfs {}: {}", p.display(), std::io::Error::last_os_error()));
-    }
-    Ok(u64::from(st.f_bavail).saturating_mul(st.f_frsize as u64))
-}
+pub use flowseam_net::node::free_bytes;
 
 /// Pid of the active app, from any thread.
 pub fn frontmost_pid() -> Option<i32> {

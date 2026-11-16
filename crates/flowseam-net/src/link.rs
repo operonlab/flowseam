@@ -109,7 +109,18 @@ pub fn serve_once_with(
     incoming: &Sender<Msg>,
     on_up: &dyn Fn(&LinkUp),
 ) -> Result<Outcome, NetError> {
-    let (mut sock, _) = listener.accept().map_err(NetError::Io)?;
+    let (sock, _) = listener.accept().map_err(NetError::Io)?;
+    serve_stream_with(sock, ep, outgoing, incoming, on_up)
+}
+
+/// [`serve_once_with`] for a connection already accepted, so a caller can serve several at once.
+pub fn serve_stream_with(
+    mut sock: TcpStream,
+    ep: &Endpoint<'_>,
+    outgoing: &Receiver<Msg>,
+    incoming: &Sender<Msg>,
+    on_up: &dyn Fn(&LinkUp),
+) -> Result<Outcome, NetError> {
     prepare(&sock)?;
     let cfg = tls::server_config(ep.identity, ep.pins.clone())?;
     let mut conn = ServerConnection::new(cfg).map_err(NetError::Tls)?;

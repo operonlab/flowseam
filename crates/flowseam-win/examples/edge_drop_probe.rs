@@ -98,7 +98,7 @@ fn own_case(armed: bool) -> Result<(), String> {
     let (folder, file) = temp_case(if armed { "own" } else { "disarmed" })?;
     let result = (|| {
         let edge = edge_point()?;
-        let source = EdgeDropSource::new(Edge::Left, win_input::displays()?);
+        let source = EdgeDropSource::new(vec![Edge::Left], win_input::displays()?);
         source.arm(armed);
         pause(300);
         let base = source.generation()?;
@@ -173,7 +173,7 @@ fn explorer_case() -> Result<(), String> {
     let (folder, file) = temp_case("explorer")?;
     let result = (|| {
         let edge = edge_point()?;
-        let source = EdgeDropSource::new(Edge::Left, win_input::displays()?);
+        let source = EdgeDropSource::new(vec![Edge::Left], win_input::displays()?);
         source.arm(true);
         pause(300);
         let base = source.generation()?;

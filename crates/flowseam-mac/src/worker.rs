@@ -16,19 +16,19 @@ use crate::sink::EmitSink;
 use crate::switch_gate::TapConfig;
 use crate::sys;
 use crate::wire::{Clock, ForwardSink, Shared};
-use crate::kvm::{self, Cmd, Done, Kvm, Phase, Step};
+use crate::kvm::{self, Done, Kvm, Phase};
+use flowseam_core::kvm_side::{finish_kvm, KVM_STOP_LIMIT, kvm_ready, kvm_start, probe_monitors, run_kvm, settings_command, want_home, write_kvm_status, KvmSide};
+use flowseam_core::menu::{menu_command, MenuCmd};
 use flowseam_core::forward::{Forwarder, FwdConfig, Mode, SwitchTo, WayBack};
-use flowseam_core::status::{CheckState, InspectStatus, KvmPhase, KvmStatus, MonitorCheck, MonitorState, OutMonitor, TrialMonitor, TrialStatus};
-use std::collections::{BTreeMap, HashMap};
+use flowseam_core::status::KvmStatus;
 use flowseam_net::identity::{from_hex, Identity};
 use flowseam_net::pins::PinSet;
 use flowseam_net::session::{PeerInfo, Timing};
 use std::time::Instant;
 use flowseam_core::backend::{BackendError, CaptureFault, CaptureSink, CapturedEvent, Disposition, InputCapture};
-use flowseam_core::config::{Config, DisplaySwitch};
+use flowseam_core::config::Config;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -60,9 +60,6 @@ fn missing_grant() -> Option<String> {
 const STALL_LIMIT: Duration = Duration::from_secs(3);
 /// How long the stop after a quit Apple event may take before the worker exits without it.
 const QUIT_LIMIT: Duration = Duration::from_secs(5);
-/// How long a stop waits for the monitor to land home. Inside the window's 6 s before SIGKILL; if it runs
-/// out, kvm.toml still says the monitor is out and the window sends it home itself.
-const KVM_STOP_LIMIT: Duration = Duration::from_secs(4);
 /// How often a configured monitor is checked again while nothing is switching: one input read each.
 const PROBE_EVERY: Duration = Duration::from_secs(30);
 /// How far the hidden cursor may wander from the main display's center before it is warped back: well
@@ -226,6 +223,7 @@ fn link_params(cfg: &Config, config_path: &std::path::Path) -> Result<LinkParams
         timing: Timing::default(),
         // Beside the config this worker runs, where the window that started it reads it.
         status: Some(flowseam_core::status::status_path(config_path)),
+        host: crate::links::host(),
     })
 }
 
@@ -265,6 +263,8 @@ fn run_with<R: Read + Send + 'static, W: Write>(cfg: &Config, config_path: &std:
     let guard = backend.guard();
 
     let routes = RouteOutbox::default();
+    let back_routes = routes.clone();
+    let back_peers: Vec<String> = cfg.peers.iter().map(|p| p.name.clone()).collect();
     let displays = sys::active_displays().unwrap_or_default();
     let home = std::path::PathBuf::from(std::env::var_os("HOME").ok_or(BackendError::Os { code: ERR_NO_HOME, api: "HOME unset: no Downloads" })?);
     let drags = DragCfg {
@@ -405,6 +405,9 @@ fn run_with<R: Read + Send + 'static, W: Write>(cfg: &Config, config_path: &std:
         beat.store(clock(), Ordering::SeqCst);
         line_waiting.store(false, Ordering::SeqCst);
         for line in lines.try_iter() {
+            if home_line(&line, &fwd, &back_peers, &mut back_routes.clone()) {
+                continue;
+            }
             let Some(cmd) = menu_command(&line) else {
                 flowseam_core::log::line(&format!("flowseam worker: unknown command from the window: {:?}", line.trim()));
                 continue;
@@ -415,6 +418,7 @@ fn run_with<R: Read + Send + 'static, W: Write>(cfg: &Config, config_path: &std:
                     settings_command(cmd, local, &mut kvm, &mut side, ddc_tx.as_ref(), &mut switch);
                     continue;
                 }
+                MenuCmd::Home => continue,
                 MenuCmd::Return(peer) => {
                     want_home(&mut home_wanted, peer);
                     continue;
@@ -486,7 +490,7 @@ fn run_with<R: Read + Send + 'static, W: Write>(cfg: &Config, config_path: &std:
         // Only between switches: a probe's reads are bus traffic, and a switch must not queue behind one.
         if matches!(kvm.phase(), Phase::Idle) && probed.is_none_or(|t| t.elapsed() >= PROBE_EVERY) {
             probed = Some(Instant::now());
-            side.refresh_edids();
+            refresh_edids(&mut side);
             probe_monitors(&side.monitors, ddc_tx.as_ref(), &mut side.checks);
         }
         write_kvm_status(&kvm, &side, kvm_file.as_deref(), &mut kvm_written);
@@ -575,127 +579,21 @@ fn run_with<R: Read + Send + 'static, W: Write>(cfg: &Config, config_path: &std:
     }
 }
 
-/// A line from the window: `switch <uuid>[,<uuid>…] <peer>` moves those monitors of the peer and then the
-/// input, `input <peer>` moves only the keyboard and mouse, `return <peer>` brings every monitor configured
-/// for the peer home (one may have changed input by itself). From the settings: `inspect <uuid>` reads a
-/// monitor's inputs, and `test <token> <uuid> <input> <home> <peer>` shows a candidate input for a while and
-/// comes back; its result carries `token`, so the window asks only about the test it started. The peer
-/// comes last because a name may hold spaces.
-#[derive(Debug, PartialEq, Eq)]
-enum MenuCmd<'a> {
-    Switch { uuids: Vec<&'a str>, peer: &'a str },
-    Input(&'a str),
-    Return(&'a str),
-    Inspect(&'a str),
-    /// Monitors as (uuid, candidate input, this Mac's input).
-    Test { token: u64, monitors: Vec<(&'a str, u16, u16)>, peer: &'a str },
+
+/// The window's `home` line (its "back" button): hands control back to whoever drives this Mac and asks the
+/// peers to bring their monitors home. False for any other line.
+fn home_line<S: flowseam_core::forward::InputSink>(line: &str, fwd: &Mutex<Forwarder<S, RouteOutbox>>, peers: &[String], routes: &mut RouteOutbox) -> bool {
+    if menu_command(line) != Some(MenuCmd::Home) {
+        return false;
+    }
+    let mut f = fwd.lock().unwrap_or_else(|e| e.into_inner());
+    flowseam_net::node::hand_back(&mut f, peers, routes, "this Mac", &|m| flowseam_core::log::line(&format!("flowseam worker: {m}")));
+    true
 }
 
-/// How long a test shows the candidate input: long enough to recognize a desktop, short enough that the
-/// person waits for it rather than doing something else.
-const TRIAL_HOLD_MS: u64 = 8000;
 
-fn menu_command(line: &str) -> Option<MenuCmd<'_>> {
-    fn rest(s: &str) -> Option<&str> {
-        Some(s.trim()).filter(|p| !p.is_empty())
-    }
-    let line = line.trim();
-    let (verb, args) = line.split_once(' ')?;
-    match verb {
-        "switch" => {
-            let (uuids, peer) = args.trim().split_once(' ')?;
-            let uuids: Vec<&str> = uuids.split(',').filter(|u| !u.is_empty()).collect();
-            if uuids.is_empty() {
-                return None;
-            }
-            Some(MenuCmd::Switch { uuids, peer: rest(peer)? })
-        }
-        "input" => rest(args).map(MenuCmd::Input),
-        "return" => rest(args).map(MenuCmd::Return),
-        "inspect" => rest(args).map(MenuCmd::Inspect),
-        // `test <token> <uuid>:<input>:<home>[,…] <peer>`: the peer last, since a name may hold spaces.
-        "test" => {
-            let mut it = args.trim().splitn(3, ' ');
-            let token = it.next()?.parse().ok()?;
-            let monitors = it
-                .next()?
-                .split(',')
-                .map(|m| {
-                    let mut f = m.split(':');
-                    let monitor = (f.next().filter(|u| !u.is_empty())?, f.next()?.parse().ok()?, f.next()?.parse().ok()?);
-                    f.next().is_none().then_some(monitor)
-                })
-                .collect::<Option<Vec<_>>>()?;
-            let peer = rest(it.next()?)?;
-            Some(MenuCmd::Test { token, monitors, peer })
-        }
-        _ => None,
-    }
-}
 
-/// The settings' commands. Both read or move only the monitor, and only between switches; a test also
-/// needs input here, since the person must be looking at this Mac to judge it.
-fn settings_command(cmd: MenuCmd<'_>, local: bool, kvm: &mut Kvm, side: &mut KvmSide, ddc: Option<&Sender<Cmd>>, switch: &mut SwitchInput<'_>) {
-    if !matches!(kvm.phase(), Phase::Idle) {
-        kvm.last_error = Some(format!("busy: {:?}", kvm.phase()));
-        return;
-    }
-    match cmd {
-        MenuCmd::Inspect(uuid) => {
-            let sent = ddc.is_some_and(|tx| tx.send(Cmd::Inspect { uuid: uuid.to_string() }).is_ok());
-            if !sent {
-                side.inspect = Some(InspectStatus { uuid: uuid.to_string(), inputs: None, current: None, reason: Some("no DDC thread".into()) });
-            }
-        }
-        MenuCmd::Test { token, monitors, peer } => {
-            if !local {
-                kvm.last_error = Some("a test needs the keyboard and mouse on this Mac".into());
-                return;
-            }
-            side.trial_id = token;
-            let target = kvm::Target { monitors: monitors.iter().map(|&(uuid, input, home)| kvm::Monitor { uuid: uuid.to_string(), input, home }).collect() };
-            let steps = kvm.trial(peer, target, TRIAL_HOLD_MS);
-            run_kvm(kvm, steps, ddc, switch);
-        }
-        MenuCmd::Switch { .. } | MenuCmd::Input(_) | MenuCmd::Return(_) => {}
-    }
-}
 
-/// The chosen monitors of `peer`, if each is in the config the worker runs with and its last probe found
-/// it usable; an untested one switches too. One that is not refuses the whole switch: switching only the
-/// rest would leave the person in front of a screen they did not choose.
-fn kvm_ready(side: &KvmSide, peer: &str, uuids: &[&str]) -> Result<kvm::Target, String> {
-    let mut monitors: Vec<kvm::Monitor> = Vec::new();
-    for &uuid in uuids {
-        let (_, d) = side.monitors.iter().find(|(p, d)| p == peer && d.uuid == uuid).ok_or_else(|| format!("monitor {uuid} is not one of {peer}'s"))?;
-        if let Some(b) = side.state(peer, d).blocked() {
-            return Err(format!("monitor switch to {peer} is not available: monitor {uuid}: {b:?}"));
-        }
-        if !monitors.iter().any(|m| m.uuid == uuid) {
-            monitors.push(kvm::Monitor { uuid: d.uuid.clone(), input: d.input, home: d.home });
-        }
-    }
-    Ok(kvm::Target { monitors })
-}
-
-/// Queues a "back" for `peer` once: asked twice before it runs, it still runs once.
-fn want_home(wanted: &mut Vec<String>, peer: &str) {
-    if !wanted.iter().any(|p| p == peer) {
-        wanted.push(peer.to_string());
-    }
-}
-
-/// Queues a probe of every configured monitor on the DDC thread; one that cannot be queued is recorded
-/// as unknown rather than left looking fine.
-fn probe_monitors(monitors: &[(String, DisplaySwitch)], ddc: Option<&Sender<Cmd>>, checks: &mut BTreeMap<(String, String), MonitorCheck>) {
-    for (peer, d) in monitors {
-        let monitor = kvm::Monitor { uuid: d.uuid.clone(), input: d.input, home: d.home };
-        let sent = ddc.is_some_and(|tx| tx.send(Cmd::Probe { peer: peer.clone(), monitor }).is_ok());
-        if !sent {
-            checks.insert((peer.clone(), d.uuid.clone()), MonitorCheck { peer: peer.clone(), state: CheckState::Unknown, reason: Some("no DDC thread".into()) });
-        }
-    }
-}
 
 /// The edges and the chord wait while monitors move (`Forwarder::hold_for_switch`), either way: on the way
 /// out, a cursor that wandered to another peer found this Mac busy and undid the switch; on the way home,
@@ -708,8 +606,15 @@ fn holds(phase: &Phase) -> bool {
     matches!(phase, Phase::Switching { .. } | Phase::Returning { .. })
 }
 
-/// Hands input to a peer (`Forwarder::switch_to`).
-type SwitchInput<'a> = dyn FnMut(&str, WayBack) -> SwitchTo + 'a;
+/// Reads the EDID identity of each monitor here into `side`, for what a peer reports it sees.
+fn refresh_edids(side: &mut KvmSide) {
+    match crate::ddc::mac::online() {
+        Ok(list) => {
+            side.edids = list.into_iter().map(|m| (m.uuid, flowseam_core::proto::MonitorId { vendor: m.edid.vendor as u16, product: m.edid.product as u16, serial: m.edid.serial })).collect();
+        }
+        Err(e) => flowseam_core::log::line(&format!("flowseam worker: monitor EDID: {e:?}")),
+    }
+}
 
 /// `Closed` when the switch will move every display of this Mac: the peer's edge back here would only lead
 /// to a screen nobody sees. A display not named in the target, or one that cannot be identified, leaves it open.
@@ -731,164 +636,6 @@ fn every_display_moved(here: &[Option<String>], target: &kvm::Target) -> bool {
     !here.is_empty() && here.iter().all(|u| u.as_ref().is_some_and(|u| target.monitors.iter().any(|m| m.uuid == *u)))
 }
 
-/// Runs the KVM policy's steps in order. A command the DDC thread cannot take is answered as failed,
-/// and whatever the policy does about that runs too.
-fn run_kvm(kvm: &mut Kvm, steps: Vec<Step>, ddc: Option<&Sender<Cmd>>, switch: &mut SwitchInput<'_>) {
-    let mut queue = std::collections::VecDeque::from(steps);
-    while let Some(step) = queue.pop_front() {
-        match step {
-            Step::SwitchInput(peer, way_back) => {
-                let r = switch(&peer, way_back);
-                flowseam_core::log::line(&format!("flowseam worker: menu switch to {peer}: {r:?}"));
-            }
-            Step::Ddc(cmd) => {
-                flowseam_core::log::line(&format!("flowseam worker: monitor command {cmd:?}"));
-                let unsent = match ddc {
-                    Some(tx) => tx.send(cmd).err().map(|e| e.0),
-                    None => Some(cmd),
-                };
-                if let Some(cmd) = unsent {
-                    let why = "no DDC thread".to_string();
-                    queue.extend(kvm.done(match cmd {
-                        Cmd::Away { peer, .. } => Done::Away { peer, result: Err(why), out: Vec::new() },
-                        // Nothing was written, so whatever was out is still out.
-                        Cmd::Home { peer, target } => Done::Home { peer, result: Err(why), out: target.monitors },
-                        Cmd::Probe { peer, monitor } => Done::Probe { uuid: monitor.uuid, check: MonitorCheck { peer, state: CheckState::Unknown, reason: Some(why) } },
-                        Cmd::Inspect { uuid } => Done::Inspect(InspectStatus { uuid, inputs: None, current: None, reason: Some(why) }),
-                    }));
-                }
-            }
-        }
-    }
-}
-
-/// Waits, at most `limit`, for an unfinished switch or return to land.
-fn finish_kvm(kvm: &mut Kvm, rx: Option<&Receiver<Done>>, limit: Duration) {
-    let deadline = Instant::now() + limit;
-    while !matches!(kvm.phase(), Phase::Idle) {
-        let Some(rx) = rx else { break };
-        match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            Ok(done) => {
-                flowseam_core::log::line(&format!("flowseam worker: monitor {done:?}"));
-                kvm.done(done);
-            }
-            Err(_) => {
-                flowseam_core::log::line(&format!("flowseam worker: the monitors' return is not confirmed {limit:?} into the stop; the window takes over"));
-                break;
-            }
-        }
-    }
-}
-
-/// What the worker keeps beside the policy for kvm.toml: the configured monitors, probe results, the
-/// settings' last inspect, and the number of the current test, so the window asks its question once per test.
-#[derive(Default)]
-struct KvmSide {
-    /// Every monitor in the config the worker runs with, and its peer, in config order.
-    monitors: Vec<(String, DisplaySwitch)>,
-    /// What the last probe found, by peer and monitor UUID.
-    checks: BTreeMap<(String, String), MonitorCheck>,
-    inspect: Option<InspectStatus>,
-    trial_id: u64,
-    /// What each linked peer says it is attached to; filled by the links.
-    peer_monitors: Option<crate::links::PeerMonitors>,
-    /// The EDID identity of each monitor here, by UUID; refreshed with every probe round.
-    edids: HashMap<String, flowseam_core::proto::MonitorId>,
-}
-
-impl KvmSide {
-    fn new(cfg: &Config, peer_monitors: Option<crate::links::PeerMonitors>) -> Self {
-        let monitors = cfg.peers.iter().flat_map(|p| p.displays.iter().map(|d| (p.name.clone(), d.clone()))).collect();
-        Self { monitors, peer_monitors, ..Self::default() }
-    }
-
-    /// One configured monitor as it stands. Whether the peer sees it is reported, never a reason to refuse:
-    /// a monitor may power down the inputs it is not showing, so the peer only sees it once it switches.
-    fn state(&self, peer: &str, d: &DisplaySwitch) -> MonitorState {
-        let reported: Option<Vec<flowseam_core::proto::MonitorId>> = self.peer_monitors.as_ref().and_then(|m| m.lock().unwrap_or_else(|e| e.into_inner()).get(peer).cloned()).flatten();
-        MonitorState {
-            peer: peer.to_string(),
-            uuid: d.uuid.clone(),
-            verified: d.verified,
-            check: self.checks.get(&(peer.to_string(), d.uuid.clone())).cloned(),
-            peer_sees: flowseam_core::status::peer_on_monitor(self.edids.get(&d.uuid).copied(), reported.as_deref()),
-        }
-    }
-
-    /// Every monitor the config has for `peer`.
-    fn monitors_of(&self, peer: &str) -> Vec<kvm::Monitor> {
-        self.monitors.iter().filter(|(p, _)| p == peer).map(|(_, d)| kvm::Monitor { uuid: d.uuid.clone(), input: d.input, home: d.home }).collect()
-    }
-
-    fn states(&self) -> Vec<MonitorState> {
-        self.monitors.iter().map(|(p, d)| self.state(p, d)).collect()
-    }
-
-    fn refresh_edids(&mut self) {
-        match crate::ddc::mac::online() {
-            Ok(list) => {
-                self.edids = list.into_iter().map(|m| (m.uuid, flowseam_core::proto::MonitorId { vendor: m.edid.vendor as u16, product: m.edid.product as u16, serial: m.edid.serial })).collect();
-            }
-            Err(e) => flowseam_core::log::line(&format!("flowseam worker: monitor EDID: {e:?}")),
-        }
-    }
-}
-
-fn kvm_view(kvm: &Kvm, side: &KvmSide) -> KvmStatus {
-    let phase = match kvm.phase() {
-        Phase::Idle => KvmPhase::Idle,
-        Phase::Switching { .. } => KvmPhase::Switching,
-        Phase::Away { .. } => KvmPhase::Away,
-        Phase::Returning { trial: None, .. } => KvmPhase::Returning,
-        Phase::Returning { trial: Some(_), .. } | Phase::Trying { .. } | Phase::Shown { .. } => KvmPhase::Testing,
-    };
-    let out = kvm.out();
-    let trial = kvm.last_trial.as_ref().map(|t| TrialStatus {
-        peer: t.peer.clone(),
-        monitors: t.monitors.iter().map(|m| TrialMonitor { uuid: m.uuid.clone(), input: m.input, home: m.home }).collect(),
-        ok: t.result.is_ok(),
-        reason: t.result.clone().err(),
-        id: side.trial_id,
-    });
-    KvmStatus {
-        written_ms: 0,
-        phase,
-        peer: out.as_ref().map(|(p, _)| p.clone()),
-        error: kvm.last_error.clone(),
-        out: out.map(|(_, ms)| ms.into_iter().map(|m| OutMonitor { uuid: m.uuid, home: m.home }).collect()).unwrap_or_default(),
-        monitors: side.states(),
-        trial,
-        trial_hold_ms: TRIAL_HOLD_MS,
-        inspect: side.inspect.clone(),
-    }
-}
-
-/// The policy this worker starts with: monitors the previous run's kvm.toml still lists as out (its return,
-/// and the window's after it, did not land) are adopted before this worker replaces the file; otherwise
-/// nothing would ever try them again.
-fn kvm_start(path: Option<&std::path::Path>) -> Kvm {
-    let mut kvm = Kvm::new();
-    let Some(prev) = path.and_then(|p| flowseam_core::status::read_kvm(p).ok()) else { return kvm };
-    if !prev.out.is_empty() {
-        flowseam_core::log::line(&format!("flowseam worker: {} monitor(s) still out from the previous run: {:?}", prev.out.len(), prev.out));
-        kvm.adopt(prev.peer.unwrap_or_default(), prev.out.into_iter().map(|o| kvm::Monitor { uuid: o.uuid, input: o.home, home: o.home }).collect());
-    }
-    kvm
-}
-
-/// Writes kvm.toml when what it says changes; the first call always writes, replacing a previous run's file.
-fn write_kvm_status(kvm: &Kvm, side: &KvmSide, path: Option<&std::path::Path>, written: &mut Option<KvmStatus>) {
-    let view = kvm_view(kvm, side);
-    if written.as_ref() == Some(&view) {
-        return;
-    }
-    let Some(path) = path else { return };
-    let stamped = KvmStatus { written_ms: flowseam_core::status::now_ms(), ..view.clone() };
-    match flowseam_core::status::write_kvm(path, &stamped) {
-        Ok(()) => *written = Some(view),
-        Err(e) => flowseam_core::log::line(&format!("flowseam worker: kvm status write: {e}")),
-    }
-}
 
 /// The normal-exit marker. A failed write is an error: without the marker the supervisor
 /// would restore a cursor that is already fine, and the caller must know that.
@@ -911,127 +658,34 @@ mod tests {
     }
 
     #[test]
-    fn window_lines_name_the_peer_and_what_to_move() {
-        assert_eq!(menu_command("switch U,V my pc\n"), Some(MenuCmd::Switch { uuids: vec!["U", "V"], peer: "my pc" }));
-        assert_eq!(menu_command("switch U pc\n"), Some(MenuCmd::Switch { uuids: vec!["U"], peer: "pc" }));
-        assert_eq!(menu_command("switch pc\n"), None, "no monitor named: the window sends `input` for that");
-        assert_eq!(menu_command("switch , pc\n"), None);
-        assert_eq!(menu_command("switch \n"), None);
-        assert_eq!(menu_command("  input  my pc \r\n"), Some(MenuCmd::Input("my pc")));
-        assert_eq!(menu_command("return my pc\n"), Some(MenuCmd::Return("my pc")));
-        assert_eq!(menu_command("return \n"), None);
-        assert_eq!(menu_command("home\n"), None);
-        assert_eq!(menu_command("inspect U-1\n"), Some(MenuCmd::Inspect("U-1")));
-        assert_eq!(menu_command("test 77 U-1:15:18 my pc\n"), Some(MenuCmd::Test { token: 77, monitors: vec![("U-1", 15, 18)], peer: "my pc" }));
-        assert_eq!(menu_command("test 77 U-1:15:18,V-2:17:19 pc\n"), Some(MenuCmd::Test { token: 77, monitors: vec![("U-1", 15, 18), ("V-2", 17, 19)], peer: "pc" }));
-        for bad in ["test 77 U-1:15:x pc", "test 77 U-1:15:18", "test 77 U-1:15 pc", "test 77 U-1:15:18:9 pc", "test 77 U-1:15:18, pc", "test 77 :15:18 pc", "test x U-1:15:18 pc"] {
-            assert_eq!(menu_command(&format!("{bad}\n")), None, "{bad}");
+    fn a_home_line_hands_control_back_to_the_peer_driving_this_mac() {
+        use flowseam_core::config::KeyMap;
+        use flowseam_core::forward::{InputSink, PeerSpec};
+        use flowseam_core::proto::{Edge as PEdge, ModifierSet, Msg, Point, Rect};
+        struct Null;
+        impl InputSink for Null {
+            fn motion_rel(&mut self, _: i32, _: i32) {}
+            fn button(&mut self, _: u8, _: bool) {}
+            fn key(&mut self, _: u16, _: bool, _: bool) {}
+            fn wheel(&mut self, _: i32, _: i32) {}
+            fn warp(&mut self, _: Point) {}
+            fn set_grab(&mut self, _: bool) {}
+            fn hide(&mut self) {}
+            fn show(&mut self) {}
+            fn set_association(&mut self, _: bool) {}
         }
-    }
-
-    #[test]
-    fn a_test_needs_input_here_and_reports_under_its_own_number() {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let mut k = Kvm::new();
-        let mut side = KvmSide::default();
-        let test = MenuCmd::Test { token: 42, monitors: vec![("U", 15, 18)], peer: "pc" };
-        settings_command(test, false, &mut k, &mut side, Some(&tx), &mut |_, _| panic!("no input moves in a test"));
-        assert!(rx.try_recv().is_err() && k.last_error.is_some(), "not while input is away");
-        let test = MenuCmd::Test { token: 42, monitors: vec![("U", 15, 18), ("V", 15, 18)], peer: "pc" };
-        settings_command(test, true, &mut k, &mut side, Some(&tx), &mut |_, _| panic!("no input moves in a test"));
-        assert_eq!(rx.try_recv(), Ok(Cmd::Away { peer: "pc".into(), target: kvm::Target { monitors: vec![mon("U"), mon("V")] } }), "both in one switch");
-        assert_eq!((side.trial_id, kvm_view(&k, &side).phase), (42, KvmPhase::Testing));
-        settings_command(MenuCmd::Inspect("U"), true, &mut k, &mut side, Some(&tx), &mut |_, _| SwitchTo::Switched);
-        assert!(rx.try_recv().is_err(), "nothing else while a test runs");
-    }
-
-    fn cfg_with(verified: [bool; 2]) -> Config {
-        let mut cfg = Config::default();
-        cfg.peers.push(flowseam_core::config::Peer {
-            name: "pc".into(),
-            addr: "192.168.1.2:24800".into(),
-            edge: flowseam_core::config::Edge::Right,
-            fingerprint: "ab".repeat(32),
-            keys: Default::default(),
-            gestures: Default::default(),
-            displays: vec![
-                DisplaySwitch { uuid: "U".into(), input: 15, home: 18, verified: verified[0] },
-                DisplaySwitch { uuid: "V".into(), input: 15, home: 18, verified: verified[1] },
-            ],
-        });
-        cfg
-    }
-
-    fn checked(cfg: &Config, state: CheckState) -> KvmSide {
-        let mut side = KvmSide::new(cfg, None);
-        for u in ["U", "V"] {
-            side.checks.insert(("pc".into(), u.into()), MonitorCheck { peer: "pc".into(), state, reason: Some("why".into()) });
-        }
-        side
-    }
-
-    #[test]
-    fn a_monitor_switch_waits_for_a_usable_probe_of_every_chosen_monitor() {
-        let both = cfg_with([true, true]);
-        assert_eq!(kvm_ready(&checked(&both, CheckState::Ok), "pc", &["U", "V"]), Ok(target()));
-        assert_eq!(kvm_ready(&checked(&both, CheckState::Ok), "pc", &["V"]), Ok(kvm::Target::one(mon("V"))), "one of them alone");
-        assert_eq!(kvm_ready(&checked(&both, CheckState::Ok), "pc", &["U", "U"]), Ok(kvm::Target::one(mon("U"))), "named twice, switched once");
-        let one_unverified = checked(&cfg_with([true, false]), CheckState::Ok);
-        assert_eq!(kvm_ready(&one_unverified, "pc", &["U", "V"]), Ok(target()), "an untested monitor switches too");
-        assert_eq!(kvm_ready(&one_unverified, "pc", &["U"]), Ok(kvm::Target::one(mon("U"))));
-        let one_down = { let mut s = checked(&cfg_with([true, false]), CheckState::Ok); s.checks.insert(("pc".into(), "V".into()), MonitorCheck { peer: "pc".into(), state: CheckState::Problem, reason: Some("gone".into()) }); s };
-        let e = kvm_ready(&one_down, "pc", &["U", "V"]).unwrap_err();
-        assert!(e.contains("monitor V") && e.contains("gone"), "one unusable monitor refuses the whole switch and is named: {e}");
-        assert!(kvm_ready(&checked(&both, CheckState::Problem), "pc", &["U"]).unwrap_err().contains("why"));
-        assert!(kvm_ready(&KvmSide::new(&both, None), "pc", &["U"]).unwrap_err().contains("NotChecked"));
-        assert!(kvm_ready(&checked(&both, CheckState::Ok), "other", &["U"]).is_err(), "another peer's name");
-        assert!(kvm_ready(&checked(&both, CheckState::Ok), "pc", &["W"]).unwrap_err().contains("not one of"));
-    }
-
-    /// Some monitors power down the inputs they are not showing, so the peer cannot see one until it
-    /// switches: what the peer reports is shown, never a reason to refuse.
-    #[test]
-    fn what_the_peer_reports_is_shown_but_does_not_block_the_switch() {
-        use flowseam_core::proto::MonitorId;
-        let mine = MonitorId { vendor: 0x09D1, product: 0x7955, serial: 0x1234 };
-        let reports = crate::links::PeerMonitors::default();
-        let mut side = checked(&cfg_with([true, true]), CheckState::Ok);
-        side.peer_monitors = Some(reports.clone());
-        side.edids.insert("U".into(), mine);
-        assert_eq!(side.states()[0].peer_sees, None, "no report yet");
-        reports.lock().unwrap().insert("pc".into(), Some(vec![MonitorId { vendor: 0x0693, product: 0xA714, serial: 1 }]));
-        assert_eq!(side.states()[0].peer_sees, Some(false));
-        assert_eq!(kvm_ready(&side, "pc", &["U", "V"]), Ok(target()));
-        reports.lock().unwrap().insert("pc".into(), Some(vec![mine]));
-        assert_eq!(kvm_view(&Kvm::new(), &side).monitors[0].peer_sees, Some(true), "kvm.toml says the same");
-    }
-
-    #[test]
-    fn every_configured_monitor_is_probed_and_an_unsent_probe_is_unknown() {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let side = KvmSide::new(&cfg_with([true, true]), None);
-        let mut checks = BTreeMap::new();
-        probe_monitors(&side.monitors, Some(&tx), &mut checks);
-        assert_eq!(rx.try_recv(), Ok(Cmd::Probe { peer: "pc".into(), monitor: mon("U") }));
-        assert_eq!(rx.try_recv(), Ok(Cmd::Probe { peer: "pc".into(), monitor: mon("V") }));
-        assert!(checks.is_empty());
-        probe_monitors(&side.monitors, None, &mut checks);
-        assert_eq!(checks[&("pc".to_string(), "V".to_string())].state, CheckState::Unknown);
-        assert_eq!(checks.len(), 2);
-    }
-
-    #[test]
-    fn a_menu_switch_reaches_the_ddc_thread_and_input_follows_its_answer() {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let mut switched = Vec::new();
-        let mut k = Kvm::new();
-        let steps = k.request("pc", Some(target()), WayBack::Closed);
-        run_kvm(&mut k, steps, Some(&tx), &mut |p, w| { switched.push((p.to_string(), w)); SwitchTo::Switched });
-        assert_eq!(rx.try_recv(), Ok(Cmd::Away { peer: "pc".into(), target: target() }));
-        assert!(switched.is_empty(), "input waits for the monitors");
-        let steps = k.done(Done::Away { peer: "pc".into(), result: Ok(()), out: vec![] });
-        run_kvm(&mut k, steps, Some(&tx), &mut |p, w| { switched.push((p.to_string(), w)); SwitchTo::Switched });
-        assert_eq!(switched, [("pc".to_string(), WayBack::Closed)], "input follows with the way back its request planned");
+        let cfg = FwdConfig { peers: vec![PeerSpec { name: "hm-ctl".into(), edge: PEdge::Left, keys: KeyMap::None, gestures: Default::default() }], policy: Default::default(), boundary_px: 2 };
+        let mut routes = RouteOutbox::default();
+        let mut f = Forwarder::new(cfg, vec![Rect { x: 0, y: 0, w: 1440, h: 900 }], Null, routes.clone());
+        f.link_up("hm-ctl");
+        f.on_msg("hm-ctl", Msg::Enter { seq: 7, edge: PEdge::Left, frac: 0x8000, mods: ModifierSet(0), pressed: vec![] }, 0);
+        assert!(matches!(f.mode(), Mode::RemoteIn { .. }), "driven: {:?}", f.mode());
+        let fwd = Mutex::new(f);
+        let peers = ["hm-ctl".to_string()];
+        assert!(!home_line("input hm-ctl\n", &fwd, &peers, &mut routes), "another command is not home");
+        assert!(matches!(fwd.lock().unwrap().mode(), Mode::RemoteIn { .. }), "another command leaves control alone");
+        assert!(home_line("home\n", &fwd, &peers, &mut routes));
+        assert!(matches!(fwd.lock().unwrap().mode(), Mode::Local), "home released control");
     }
 
     #[test]
@@ -1058,63 +712,6 @@ mod tests {
         assert!(!holds(&Phase::Away { peer: "pc".into(), target: t.clone() }), "the session is the peer's then");
         assert!(!holds(&Phase::Idle));
         assert!(!holds(&Phase::Trying { peer: "pc".into(), target: t, hold_ms: 1 }), "a test keeps input here");
-    }
-
-    #[test]
-    fn without_a_ddc_thread_a_switch_fails_and_says_why() {
-        let mut k = Kvm::new();
-        let steps = k.request("pc", Some(target()), WayBack::Open);
-        run_kvm(&mut k, steps, None, &mut |_, _| panic!("input must not move"));
-        assert_eq!(k.phase(), &Phase::Idle);
-        assert_eq!(k.last_error.as_deref(), Some("no DDC thread"));
-    }
-
-    #[test]
-    fn kvm_status_is_written_once_per_change() {
-        let path = std::env::temp_dir().join(format!("flowseam-kvm-worker-{}-{}.toml", std::process::id(), flowseam_core::status::now_ms()));
-        let mut written = None;
-        let mut k = Kvm::new();
-        let side = KvmSide::new(&cfg_with([true, false]), None);
-        write_kvm_status(&k, &side, Some(&path), &mut written);
-        let first = flowseam_core::status::read_kvm(&path).unwrap();
-        assert_eq!(first.phase, KvmPhase::Idle);
-        assert_eq!(first.monitors.iter().map(|m| (m.uuid.as_str(), m.verified)).collect::<Vec<_>>(), [("U", true), ("V", false)], "the window gates on what the worker runs");
-        assert_eq!(first.trial_hold_ms, TRIAL_HOLD_MS);
-        std::fs::remove_file(&path).unwrap();
-        write_kvm_status(&k, &side, Some(&path), &mut written);
-        assert!(!path.exists(), "unchanged: not rewritten");
-        k.request("pc", Some(target()), WayBack::Open);
-        write_kvm_status(&k, &side, Some(&path), &mut written);
-        let s = flowseam_core::status::read_kvm(&path).unwrap();
-        assert_eq!((s.phase, s.peer.as_deref()), (KvmPhase::Switching, Some("pc")));
-        assert_eq!(s.out, [OutMonitor { uuid: "U".into(), home: 18 }, OutMonitor { uuid: "V".into(), home: 18 }], "names every monitor for the window's fallback");
-        std::fs::remove_file(path).unwrap();
-    }
-
-    #[test]
-    fn monitors_the_previous_run_left_out_are_adopted_and_stay_listed() {
-        let path = std::env::temp_dir().join(format!("flowseam-kvm-adopt-{}-{}.toml", std::process::id(), flowseam_core::status::now_ms()));
-        assert_eq!(kvm_start(Some(&path)).out(), None, "no previous file");
-        let prev = KvmStatus { written_ms: 1, peer: Some("pc".into()), out: vec![OutMonitor { uuid: "V".into(), home: 18 }], ..Default::default() };
-        flowseam_core::status::write_kvm(&path, &prev).unwrap();
-        let mut k = kvm_start(Some(&path));
-        let mut written = None;
-        write_kvm_status(&k, &KvmSide::default(), Some(&path), &mut written);
-        assert_eq!(flowseam_core::status::read_kvm(&path).unwrap().out, prev.out, "this run's kvm.toml keeps naming it");
-        assert_eq!(k.stop(), vec![Step::Ddc(Cmd::Home { peer: "pc".into(), target: kvm::Target { monitors: vec![kvm::Monitor { uuid: "V".into(), input: 18, home: 18 }] } })]);
-        std::fs::remove_file(path).unwrap();
-    }
-
-    #[test]
-    fn a_back_brings_every_monitor_of_that_peer_and_is_asked_once() {
-        let side = KvmSide::new(&cfg_with([true, false]), None);
-        assert_eq!(side.monitors_of("pc"), target().monitors, "unconfirmed ones too: going home needs no confirmation");
-        assert_eq!(side.monitors_of("air"), vec![]);
-        let mut wanted = Vec::new();
-        want_home(&mut wanted, "pc");
-        want_home(&mut wanted, "pc");
-        want_home(&mut wanted, "air");
-        assert_eq!(wanted, ["pc", "air"]);
     }
 
     #[test]

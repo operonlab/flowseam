@@ -1317,7 +1317,7 @@ dependencies = [
 
 [[package]]
 name = "flowseam"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "eframe",
  "flowseam-core",
@@ -1337,7 +1337,7 @@ dependencies = [
 
 [[package]]
 name = "flowseam-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "postcard",
  "serde",
@@ -1345,8 +1345,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "flowseam-linux"
+version = "0.1.5"
+dependencies = [
+ "flowseam-core",
+ "flowseam-net",
+ "libc",
+]
+
+[[package]]
 name = "flowseam-mac"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "block2 0.6.2",
  "crossbeam-channel",
@@ -1360,7 +1369,7 @@ dependencies = [
 
 [[package]]
 name = "flowseam-net"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "crossbeam-channel",
  "flowseam-core",
@@ -1375,7 +1384,7 @@ dependencies = [
 
 [[package]]
 name = "flowseam-win"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "crossbeam-channel",
  "flowseam-core",

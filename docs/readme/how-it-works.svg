@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="980" height="340" viewBox="0 0 980 340" role="img" aria-labelledby="t">
-  <title id="t">A MacBook Pro, a Mac mini with the keyboard and mouse, and a Windows PC side by side. Between the Macs the pointer and keyboard, clipboard text, files and media keys cross both ways. From the Mac mini to the Windows PC the pointer, keyboard and media keys go one way; clipboard text and files go both ways. The machines connect directly, over mutual TLS.</title>
+  <title id="t">A MacBook Pro, a Mac mini with the keyboard and mouse, and a Windows PC side by side. The pointer and keyboard, clipboard text, files and media keys cross both ways between every pair of neighbors: either Mac can drive the other, and the Mac mini and the Windows PC can each drive the other. The machines connect directly, over mutual TLS.</title>
   <defs>
     <linearGradient id="screen" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#3b82f6"/>
@@ -11,9 +11,6 @@
     </linearGradient>
     <marker id="headGreen" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M0 0 L10 5 L0 10 Z" fill="#34d399"/>
-    </marker>
-    <marker id="headBlue" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M0 0 L10 5 L0 10 Z" fill="#60a5fa"/>
     </marker>
     <symbol id="pointer" viewBox="0 0 24 24">
       <path d="M6 3 L6 19 L10 15 L13 21.5 L15.6 20.4 L12.7 14 L18.5 14 Z" fill="#e5e7eb" stroke="#e5e7eb" stroke-width="1" stroke-linejoin="round"/>
@@ -85,17 +82,17 @@
     <line x1="300" y1="191" x2="362" y2="191" stroke="#34d399" stroke-width="2.4" marker-start="url(#headGreen)" marker-end="url(#headGreen)"/>
   </g>
 
-  <!-- Mac to Windows: the Mac drives the PC; clipboard and files go both ways -->
+  <!-- Mac to Windows: everything, both ways -->
   <g>
     <use href="#pointer" x="618" y="66" width="22" height="22"/>
     <use href="#keyboard" x="638" y="66" width="22" height="22"/>
-    <line x1="668" y1="77" x2="732" y2="77" stroke="#60a5fa" stroke-width="2.4" marker-end="url(#headBlue)"/>
+    <line x1="668" y1="77" x2="732" y2="77" stroke="#34d399" stroke-width="2.4" marker-start="url(#headGreen)" marker-end="url(#headGreen)"/>
     <use href="#clipboard" x="628" y="104" width="22" height="22"/>
     <line x1="668" y1="115" x2="732" y2="115" stroke="#34d399" stroke-width="2.4" marker-start="url(#headGreen)" marker-end="url(#headGreen)"/>
     <use href="#file" x="628" y="142" width="22" height="22"/>
     <line x1="668" y1="153" x2="732" y2="153" stroke="#34d399" stroke-width="2.4" marker-start="url(#headGreen)" marker-end="url(#headGreen)"/>
     <use href="#speaker" x="628" y="180" width="22" height="22"/>
-    <line x1="668" y1="191" x2="732" y2="191" stroke="#60a5fa" stroke-width="2.4" marker-end="url(#headBlue)"/>
+    <line x1="668" y1="191" x2="732" y2="191" stroke="#34d399" stroke-width="2.4" marker-start="url(#headGreen)" marker-end="url(#headGreen)"/>
   </g>
 
   <!-- Direct links, no server -->

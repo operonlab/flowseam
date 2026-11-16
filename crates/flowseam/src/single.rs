@@ -68,7 +68,16 @@ mod tests {
         assert!(matches!(first, Start::First(_)));
         assert!(matches!(claim(&d).unwrap(), Start::Second), "a second window process while the first runs");
         drop(first);
-        assert!(matches!(claim(&d).unwrap(), Start::First(_)), "the lock goes with the first");
+        // A child another test is spawning right now holds a copy of the lock's fd between fork and exec (measured
+        // up to ~0.5 ms on macOS), so the lock can outlive the drop by that long. Wait for it, not for instantly.
+        let end = Instant::now() + Duration::from_secs(2);
+        let again = loop {
+            let s = claim(&d).unwrap();
+            if matches!(s, Start::First(_)) || Instant::now() >= end { break s; }
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        assert!(matches!(again, Start::First(_)), "the lock goes with the first");
+        drop(again);
         std::fs::remove_dir_all(d).unwrap();
     }
 

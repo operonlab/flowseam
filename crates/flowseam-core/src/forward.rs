@@ -82,6 +82,31 @@ pub struct FwdConfig {
     pub boundary_px: i32,
 }
 
+/// What kind of machine something is, for the choices that differ between a Mac and a PC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MachineKind {
+    Mac,
+    Pc,
+}
+
+impl MachineKind {
+    /// The kind this build runs on: the Mac app is a Mac, every other platform a PC. This crate's own tests
+    /// are written from a Mac's side whatever host runs them (they pick the other side with `set_own_kind`).
+    pub const fn this_build() -> Self {
+        if cfg!(any(target_os = "macos", test)) { Self::Mac } else { Self::Pc }
+    }
+}
+
+/// Is the peer behind `keys` a Mac, seen from a machine of kind `own`? The same `KeyMap` means opposite things
+/// on the two: a Mac stores `None` for a peer that is a Mac too and `Mac`/`Position` for a PC; a PC stores
+/// `Position` for a Mac and `None` for a PC. (`Mac` is only meaningful on a Mac, so a PC reads it as a PC.)
+pub fn peer_kind(own: MachineKind, keys: KeyMap) -> MachineKind {
+    match (own, keys) {
+        (MachineKind::Mac, KeyMap::None) | (MachineKind::Pc, KeyMap::Position) => MachineKind::Mac,
+        _ => MachineKind::Pc,
+    }
+}
+
 impl FwdConfig {
     pub fn from_config(cfg: &Config) -> Result<Self, ChordError> {
         Ok(Self {
@@ -158,6 +183,7 @@ pub struct Forwarder<S: InputSink, O: Outbox> {
     speaks: HashMap<String, u16>,
     /// Gestures as shortcuts, for this session's peer or for this machine; fresh per session.
     gesture_keys: GestureKeys,
+    own_kind: MachineKind,
     /// The primary button is down from a press made here while input stayed local.
     held_here: bool,
     /// The primary button is physically down (tap view, any mode).
@@ -192,6 +218,7 @@ impl<S: InputSink, O: Outbox> Forwarder<S, O> {
             mac_keys: MacShortcuts::new(),
             speaks: HashMap::new(),
             gesture_keys: GestureKeys::new(),
+            own_kind: MachineKind::this_build(),
             held_here: false,
             primary_down: false,
             crossed_holding: false,
@@ -199,6 +226,11 @@ impl<S: InputSink, O: Outbox> Forwarder<S, O> {
             switch_hold: None,
             way_back: WayBack::Open,
         }
+    }
+
+    /// Override the kind of machine this forwarder runs on (it defaults to the build's own).
+    pub fn set_own_kind(&mut self, kind: MachineKind) {
+        self.own_kind = kind;
     }
 
     pub fn mode(&self) -> &Mode {
@@ -348,6 +380,11 @@ impl<S: InputSink, O: Outbox> Forwarder<S, O> {
     /// decode would end the link.
     pub fn peer_speaks(&mut self, peer: &str, ver: u16) {
         self.speaks.insert(peer.to_string(), ver);
+    }
+
+    /// The protocol the live link to `peer` speaks; `None` when no link is up.
+    pub fn speaks(&self, peer: &str) -> Option<u16> {
+        self.speaks.get(peer).copied()
     }
 
     /// A dropped link frees whatever it held: RemoteOut returns local at once, RemoteIn
@@ -651,8 +688,7 @@ impl<S: InputSink, O: Outbox> Forwarder<S, O> {
     fn gesture_msgs(&mut self, peer: &str, seq: u32, g: Gesture) -> Vec<Msg> {
         let found = self.cfg.peers.iter().find(|p| p.name == peer);
         let keys = found.map_or(KeyMap::None, |p| p.keys);
-        // `None` is the map for a peer that is also a Mac; the other two are for a PC.
-        if keys == KeyMap::None {
+        if peer_kind(self.own_kind, keys) == MachineKind::Mac {
             let speaks = self.speaks.get(peer).copied();
             if speaks.is_some_and(|v| v >= GESTURE_PROTO_VERSION) {
                 crate::log::line(&format!("flowseam: gesture {g:?} to {peer}"));
@@ -663,7 +699,8 @@ impl<S: InputSink, O: Outbox> Forwarder<S, O> {
             crate::log::line(&format!("flowseam: gesture {g:?} not sent to {peer}: it speaks protocol {speaks:?}"));
             return Vec::new();
         }
-        let habit = found.map_or(Habit::Mac, |p| p.gestures.habit(keys));
+        // Linked follows the peer's keys; from a PC the peer is a PC, so it is the Windows habit.
+        let habit = found.map_or(Habit::Mac, |p| p.gestures.habit(if self.own_kind == MachineKind::Pc { KeyMap::Position } else { keys }));
         let strokes = self.gesture_keys.strokes(g, Platform::Pc(habit));
         crate::log::line(&format!("flowseam: gesture {g:?} to {peer} as {strokes:?}"));
         strokes.into_iter().map(|s| match s {
@@ -2708,6 +2745,57 @@ mod tests {
             let n = f.out().0.len();
             assert_eq!(f.on_captured(CapturedEvent::Gesture(Gesture::SpaceRight), 300), Disposition::Swallow, "{what}");
             assert_eq!(f.out().0.len(), n, "{what}");
+        }
+    }
+
+    fn pc_fwd(keys: KeyMap, gestures: GestureMap) -> (Forwarder<Rec, Mail>, u32) {
+        let mut config = cfg(Edge::Right);
+        config.peers[0].keys = keys;
+        config.peers[0].gestures = gestures;
+        let mut f = Forwarder::new(config, screen(), Rec::default(), Mail::default());
+        f.set_own_kind(MachineKind::Pc);
+        f.link_up("b");
+        f.peer_speaks("b", GESTURE_PROTO_VERSION);
+        let seq = go_out(&mut f);
+        (f, seq)
+    }
+
+    #[test]
+    fn peer_kind_reads_the_key_map_from_the_controllers_side() {
+        use MachineKind::{Mac, Pc};
+        for (own, keys, peer) in [
+            (Mac, KeyMap::None, Mac), (Mac, KeyMap::Mac, Pc), (Mac, KeyMap::Position, Pc),
+            (Pc, KeyMap::Position, Mac), (Pc, KeyMap::None, Pc), (Pc, KeyMap::Mac, Pc),
+        ] {
+            assert_eq!(peer_kind(own, keys), peer, "{own:?} {keys:?}");
+        }
+    }
+
+    #[test]
+    fn a_pc_controller_sends_a_gesture_natively_to_a_mac_peer() {
+        let (mut f, seq) = pc_fwd(KeyMap::Position, GestureMap::Linked);
+        let n = f.out().0.len();
+        f.on_captured(CapturedEvent::Gesture(Gesture::SpaceRight), 300);
+        assert_eq!(&msgs(&f)[n..], &[Msg::Gesture { seq, gesture: Gesture::SpaceRight }]);
+    }
+
+    #[test]
+    fn a_pc_controller_sends_shortcuts_with_the_peers_habit_to_a_pc_peer() {
+        const D: u16 = 0x07;
+        for (gestures, down) in [(GestureMap::Linked, D), (GestureMap::Windows, D), (GestureMap::Mac, TAB)] {
+            let (mut f, seq) = pc_fwd(KeyMap::None, gestures);
+            let n = f.out().0.len();
+            f.on_captured(CapturedEvent::Gesture(Gesture::Overview), 300);
+            f.on_captured(CapturedEvent::Gesture(Gesture::AppWindows), 300);
+            let mut want = chord_msgs(seq, &[GUI, TAB]);
+            want.extend(chord_msgs(seq, &[ESC]));
+            assert_eq!(&msgs(&f)[n..], want, "{gestures:?}");
+            // A click in Task View picked a window: the habit decides what swiping down does next.
+            f.on_captured(CapturedEvent::Gesture(Gesture::Overview), 300);
+            f.on_captured(CapturedEvent::Button { button: LEFT, down: true }, 300);
+            let n = f.out().0.len();
+            f.on_captured(CapturedEvent::Gesture(Gesture::AppWindows), 300);
+            assert_eq!(&msgs(&f)[n..], chord_msgs(seq, &[GUI, down]), "{gestures:?}");
         }
     }
 

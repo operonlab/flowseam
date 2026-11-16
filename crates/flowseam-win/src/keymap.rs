@@ -162,9 +162,104 @@ pub fn hid_to_scan(hid: u16) -> Option<Scan> {
     }
 }
 
+// Virtual keys the scan code alone cannot name.
+const VK_PAUSE: u32 = 0x13;
+const VK_NUMLOCK: u32 = 0x90;
+const VK_VOLUME_MUTE: u32 = 0xAD;
+const VK_VOLUME_DOWN: u32 = 0xAE;
+const VK_VOLUME_UP: u32 = 0xAF;
+const VK_MEDIA_NEXT_TRACK: u32 = 0xB0;
+const VK_MEDIA_PREV_TRACK: u32 = 0xB1;
+const VK_MEDIA_PLAY_PAUSE: u32 = 0xB3;
+
+/// The HID usage of a key a low-level hook reported: its scan code and `LLKHF_EXTENDED`, with the virtual
+/// key for what the scan code cannot tell. `None` for a key with no usage here, which the caller drops.
+///
+/// Pause comes as the bare 0x45 that NumLock is injected with, and NumLock as an extended 0x45, so both go
+/// by virtual key. Media keys can come with scan code 0 (some keyboards, other software's injection), so
+/// they fall back to it. The scan code is taken whole: the fake Ctrl that AltGr sends reports 0x21D, and
+/// the fake Shifts around Print Screen an extended 0x2A; neither is a key, and neither matches.
+pub fn scan_to_hid(scan: u32, extended: bool, vk: u32) -> Option<u16> {
+    match vk {
+        VK_PAUSE => return Some(0x48),
+        VK_NUMLOCK => return Some(0x53),
+        _ => {}
+    }
+    if let Ok(code) = u16::try_from(scan) {
+        if code != 0 {
+            if let Some(&hid) = reverse().get(&Scan { code, extended }) {
+                return Some(hid);
+            }
+        }
+    }
+    match vk {
+        VK_VOLUME_MUTE => Some(0x7F),
+        VK_VOLUME_UP => Some(0x80),
+        VK_VOLUME_DOWN => Some(0x81),
+        VK_MEDIA_PLAY_PAUSE => Some(0xE8),
+        VK_MEDIA_PREV_TRACK => Some(0xEA),
+        VK_MEDIA_NEXT_TRACK => Some(0xEB),
+        _ => None,
+    }
+}
+
+/// `hid_to_scan` turned around. Where two usages share a scan code (`\` and the ISO `#`), the lower one wins:
+/// a PC keyboard has one key there, and the Mac reads either the same way.
+fn reverse() -> &'static std::collections::HashMap<Scan, u16> {
+    static MAP: std::sync::OnceLock<std::collections::HashMap<Scan, u16>> = std::sync::OnceLock::new();
+    MAP.get_or_init(|| {
+        let mut m = std::collections::HashMap::new();
+        // NumLock is injected as a bare 0x45, but hooks report it extended and Pause as the bare 0x45: both
+        // go by virtual key, so 0x45 names nothing here.
+        for hid in (0u16..=0xFF).filter(|&h| h != 0x53) {
+            if let Some(sc) = hid_to_scan(hid) {
+                m.entry(sc).or_insert(hid);
+            }
+        }
+        m
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every key Windows can type for a peer, typed here, goes back out as the same usage: the two tables
+    /// cannot drift apart. NumLock and Pause share 0x45 and are told apart by virtual key; the ISO `#` key
+    /// is the `\` key on a PC.
+    #[test]
+    fn every_injectable_key_reads_back_as_itself() {
+        for hid in 0u16..=0xFF {
+            let Some(sc) = hid_to_scan(hid) else { continue };
+            let want = match hid {
+                0x32 => 0x31,
+                _ => hid,
+            };
+            let vk = match hid {
+                0x53 => VK_NUMLOCK,
+                _ => 0,
+            };
+            assert_eq!(scan_to_hid(u32::from(sc.code), sc.extended, vk), Some(want), "HID {hid:#04x} via {sc:?}");
+        }
+    }
+
+    /// What a hook reports for the keys whose scan code is not enough, measured shapes from the set-1 table.
+    #[test]
+    fn keys_the_scan_code_cannot_name_go_by_virtual_key() {
+        assert_eq!(scan_to_hid(0x45, false, VK_PAUSE), Some(0x48), "Pause");
+        assert_eq!(scan_to_hid(0x45, true, VK_NUMLOCK), Some(0x53), "NumLock, reported extended");
+        assert_eq!(scan_to_hid(0x45, false, 0x45), None, "a bare 0x45 that is neither is no key");
+        assert_eq!(scan_to_hid(0, false, VK_VOLUME_UP), Some(0x80), "a media key without a scan code");
+        assert_eq!(scan_to_hid(0, false, VK_MEDIA_PLAY_PAUSE), Some(0xE8));
+        assert_eq!(scan_to_hid(0x30, true, VK_VOLUME_UP), Some(0x80), "with its scan code");
+    }
+
+    #[test]
+    fn the_fake_keys_windows_adds_are_not_keys() {
+        assert_eq!(scan_to_hid(0x21D, false, 0xA2), None, "AltGr's fake left Ctrl");
+        assert_eq!(scan_to_hid(0x2A, true, 0xA0), None, "the fake Shift around Print Screen");
+        assert_eq!(scan_to_hid(0, false, 0x41), None, "a virtual key alone names no letter");
+    }
 
     #[test]
     fn every_letter_digit_and_modifier_has_a_scan_code() {

@@ -155,22 +155,15 @@ fn cmd_worker(args: &[String]) -> i32 {
     };
     #[cfg(target_os = "windows")]
     {
-        use std::io::BufRead;
-        // Each stdin line is a command from the window (`home` is its "back" button); EOF is the stop request.
-        std::thread::spawn(|| {
-            let mut stdin = std::io::stdin().lock();
-            let mut buf = Vec::new();
-            while matches!(stdin.read_until(b'\n', &mut buf), Ok(n) if n > 0) {
-                if String::from_utf8_lossy(&buf).trim() == "home" {
-                    flowseam_win::app::ask_home();
-                }
-                buf.clear();
+        // The worker reads the window's stdin lines itself (`home` is the "back" button); EOF is the stop request.
+        let machine = match flowseam_win::app::this_pc() {
+            Ok(m) => m,
+            Err(e) => {
+                flowseam_core::log::line(&format!("worker: {e}"));
+                return 1;
             }
-            std::process::exit(0);
-        });
-        let (clipboard, injector, displays) = flowseam_win::real_host_parts();
-        let host = flowseam_win::app::Host { clipboard: &*clipboard, injector: &*injector, displays: &*displays };
-        return match flowseam_win::app::run_serve(&path, &host) {
+        };
+        return match flowseam_win::app::run(&path, machine) {
             Ok(()) => 0,
             Err(e) => {
                 flowseam_core::log::line(&format!("worker: {e}"));
@@ -220,8 +213,8 @@ pub fn pair_as_client(addr: &str, code: &str) -> Result<flowseam_net::identity::
 }
 
 /// What a cancelled pairing server returns, so the window can say "cancelled" rather than "failed".
-#[cfg(any(target_os = "macos", test))]
-pub const PAIR_CANCELLED: &str = "pairing cancelled";
+#[cfg(any(target_os = "macos", windows, test))]
+pub const PAIR_CANCELLED: &str = flowseam_net::node::PAIR_CANCELLED;
 
 /// Keep the code valid across connections that do not pair until one peer pairs, or until `cancel` is raised.
 /// `accept` blocks, so a cancel also connects to the listener (`pair_serve_cancel`); that attempt fails and the

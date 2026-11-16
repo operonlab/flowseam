@@ -39,7 +39,7 @@ struct State {
     generation: AtomicU64,
     files: Mutex<Vec<PathBuf>>,
     armed: AtomicBool,
-    settings: Mutex<(Edge, Vec<Rect>)>,
+    settings: Mutex<(Vec<Edge>, Vec<Rect>)>,
     thread_id: AtomicU32,
 }
 
@@ -70,10 +70,10 @@ impl Drop for State {
 pub struct EdgeDropSource(Arc<State>);
 
 impl EdgeDropSource {
-    pub fn new(edge: Edge, displays: Vec<Rect>) -> Self {
+    pub fn new(edges: Vec<Edge>, displays: Vec<Rect>) -> Self {
         let state = Arc::new(State {
             generation: AtomicU64::new(0), files: Mutex::new(Vec::new()),
-            armed: AtomicBool::new(false), settings: Mutex::new((edge, displays)), thread_id: AtomicU32::new(0),
+            armed: AtomicBool::new(false), settings: Mutex::new((edges, displays)), thread_id: AtomicU32::new(0),
         });
         let weak = Arc::downgrade(&state);
         if let Err(e) = std::thread::Builder::new().name("flowseam-edge-drop".into()).spawn(move || sta(weak)) {
@@ -87,9 +87,10 @@ impl EdgeDropSource {
         self.0.wake();
     }
 
-    pub fn set_edge(&self, edge: Edge, displays: Vec<Rect>) {
+    /// The edges facing the peers, one strip each where that edge leads off the desktop.
+    pub fn set_edges(&self, edges: Vec<Edge>, displays: Vec<Rect>) {
         let mut settings = self.0.settings.lock().unwrap_or_else(|e| e.into_inner());
-        settings.0 = edge;
+        settings.0 = edges;
         settings.1 = displays;
         drop(settings);
         self.0.wake();
@@ -236,7 +237,7 @@ fn sta(state: Weak<State>) {
                 if let Err(e) = unsafe { RevokeDragDrop(hwnd) } { log(&format!("RevokeDragDrop failed HRESULT={:#x}", e.code().0)); }
                 let _ = unsafe { DestroyWindow(hwnd) };
             }
-            for (x, y, w, h) in strips(&settings.1, settings.0) {
+            for (x, y, w, h) in settings.0.iter().flat_map(|&edge| strips(&settings.1, edge)) {
                 let ex = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED;
                 match unsafe { CreateWindowExW(ex, class, PCWSTR::null(), WS_POPUP, x, y, w, h, None, None, None, None) } {
                     Ok(hwnd) => {

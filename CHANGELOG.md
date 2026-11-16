@@ -6,6 +6,50 @@ All notable changes to Flowseam are listed here, newest first. The format follow
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-11-16
+
+### Upgrading
+
+- Update every machine together. On a Mac, `brew upgrade --cask flowseam`. On Windows, quit Flowseam from the
+  tray and replace `flowseam.exe` with `Flowseam-0.1.5-windows-x64.exe` from the Releases page.
+
+### Added
+
+- A Windows PC drives the Mac with its own keyboard and mouse, the way a Mac drives it: rest the cursor at the
+  edge facing the Mac, or press the switch chord (Ctrl+Alt+Windows+S by default), and the keyboard, mouse, wheel
+  and volume and media keys go to the Mac until the cursor comes back across that edge. Files dragged across it
+  go along, both ways. Keys go by position: Alt lands on Command and the Windows key on Option. While the PC
+  drives the Mac its cursor waits, hidden, in the middle of its screen. Ctrl+Alt+Windows+Esc brings the
+  keyboard and mouse back to the PC.
+- The Windows settings window has what a controller needs: the switch chord under Switching, a Key Mapping for
+  each computer, and pairing either way, by showing this PC's code or by typing another computer's.
+- A Windows PC keeps a link to every computer in its list at once, and connects to them itself as well as
+  waiting for them, as a Mac does.
+- Input at a Windows PC that a Mac is driving takes the PC back, as it already does on a Mac: a key, a click,
+  or moving its own mouse a few pixels.
+- A Windows PC driving the Mac comes home on its own if Windows stops passing it the keyboard or mouse (Windows
+  removes an input hook it finds too slow without a word), and keys that went down on the PC are released there
+  however the cursor left.
+- A Mac that another computer drives shows **Back to** that computer in its menu, as a Windows PC already does:
+  it hands the keyboard and mouse back and asks that computer to bring its monitors home.
+- Experimental, not yet tried on a real touchpad: three- and four-finger swipes on a Windows Precision Touchpad
+  reach the computer the PC drives. A Mac gets them as its own gestures (spaces, Mission Control, App Exposé),
+  not as PC shortcuts. Pinch stays the Ctrl+wheel Windows already sends.
+- Experimental, not yet tried on a real monitor from Windows: a Windows PC can switch monitors along with the
+  keyboard and mouse, as a Mac with Apple silicon does, with the same monitor rows, test and switch button.
+  Monitors are told apart by their device, not by the DISPLAY number Windows hands out again after a
+  reconnect.
+
+### Changed
+
+- The Pairing page no longer says that Windows shows the code: either computer can show it, a Mac or a PC.
+
+### Fixed
+
+- A locked Windows desktop no longer fills the Windows log with a clipboard error twice a second, pushing
+  everything else out of it. The error is logged once, and how many more times it happened is logged when the
+  clipboard can be read again or the link to the Mac ends.
+
 ## [0.1.4] - 2026-11-11
 
 ### Upgrading
